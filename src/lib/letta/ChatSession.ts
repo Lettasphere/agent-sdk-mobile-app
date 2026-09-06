@@ -165,6 +165,14 @@ export class ChatSession {
    *  The server never sends a `result` for runs this client didn't start —
    *  external completion is tracked via loop_status transitions instead. */
   private externalRunActive = false;
+  /**
+   * Resolves when the attach-time permission restore settles (applied or
+   * failed). send() awaits this: a first message fired before the restore
+   * lands executes in the device's PREVIOUS mode — the exact race that had
+   * "unrestricted" turns hitting approval walls (UI showed unrestricted
+   * instantly via snapshot-restore, but the server device was still standard).
+   */
+  private permRestoreSettled: Promise<void> = Promise.resolve();
   private externalRunSawError = false;
   /**
    * While an external run is active, the transcript reconciles over REST on a
@@ -323,6 +331,11 @@ export class ChatSession {
   }
 
   async send(text: string, attachments: Attachment[] = []): Promise<void> {
+    // Wait for the attach-time permission restore: sending before it lands
+    // executes in the device's previous mode (approval walls on turns the
+    // user believes are unrestricted). Restore is one AsyncStorage read +
+    // one API call — the wait is imperceptible in practice.
+    await this.permRestoreSettled;
     // Stamp the echo with the otid we hand to send() (SDK 0.7.0,
     // letta-agent-sdk#273): the persisted user message comes back under the same
     // otid, so the accumulator keys it to this row and the echo retires by
@@ -680,6 +693,11 @@ export class ChatSession {
     // Set the guard BEFORE the async AsyncStorage read so onDeviceStatus can't
     // clobber our restored mode while we're waiting for storage.
     this.permRestoreInFlight = true;
+    this.permRestoreSettled = this.doRestorePermissionMode();
+    await this.permRestoreSettled;
+  }
+
+  private async doRestorePermissionMode(): Promise<void> {
     setTimeout(() => { this.permRestoreInFlight = false; }, 5000);
     try {
       const resolved = await resolveEffectivePermission(
