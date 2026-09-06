@@ -1190,8 +1190,8 @@ export default function ChatScreen() {
               ? activeProfile.computerSelector.connectionId
               : null
           }
-          onSelect={(connectionId, name) => {
-            void selectEnvironment(connectionId, name);
+          onSelect={(connectionId, name, deviceId) => {
+            void selectEnvironment(connectionId, name, deviceId);
           }}
           loading={envLoading}
           error={envError}
