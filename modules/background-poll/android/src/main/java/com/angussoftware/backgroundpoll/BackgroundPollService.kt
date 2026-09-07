@@ -390,24 +390,8 @@ class BackgroundPollService : Service() {
    * (like Google Messages), instead of the app launcher icon. Returns the
    * channel id to notify on.
    */
-  private fun ensureConversationChannel(spec: ConversationSpec, avatar: Bitmap?): String {
-    val channelId = "conv-${spec.conversationId.hashCode()}"
-    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return CONVERSATIONS_CHANNEL_ID
-    val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
-    val existing = nm.getNotificationChannel(channelId)
-    if (existing != null) {
-      // Renamed conversation: the channel name is frozen at first creation
-      // while the Person name is always current — the two diverge and one
-      // notification shows both titles. Channel name/description are the
-      // mutable fields; rewriting them updates the header in place.
-      if (existing.name != spec.title) {
-        existing.name = spec.title
-        existing.description = "Run completions for ${spec.title}"
-        nm.createNotificationChannel(existing)
-      }
-      return channelId
-    }
-
+  /** Push/refresh the long-lived conversation shortcut (label = current title). */
+  private fun pushConversationShortcut(spec: ConversationSpec) {
     val deepLink = Uri.parse(
       "agents-chat://chat?conversationId=${spec.conversationId}&agentId=${spec.agentId}&title=${Uri.encode(spec.title)}"
     )
@@ -415,6 +399,7 @@ class BackgroundPollService : Service() {
       .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
     val iconRes = resources.getIdentifier("notif_transparent", "drawable", packageName)
       .takeIf { it != 0 } ?: applicationInfo.icon
+    val avatar = avatarFor(spec)
     val shortcut = ShortcutInfoCompat.Builder(this, spec.conversationId)
       .setShortLabel(spec.title)
       .setLongLabel(spec.title)
@@ -431,6 +416,37 @@ class BackgroundPollService : Service() {
     } catch (e: Exception) {
       Log.w(TAG, "shortcut push failed conv=${spec.conversationId.takeLast(8)}: ${e.message}")
     }
+  }
+
+  private fun ensureConversationChannel(spec: ConversationSpec, avatar: Bitmap?): String {
+    val channelId = "conv-${spec.conversationId.hashCode()}"
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return CONVERSATIONS_CHANNEL_ID
+    val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+    val existing = nm.getNotificationChannel(channelId)
+    if (existing != null) {
+      // Renamed conversation: BOTH the channel name and the conversation
+      // SHORTCUT label are frozen at first creation, and One UI renders the
+      // shortcut label as the conversation header — a stale label plus a
+      // current spec.title shows two different titles in one notification.
+      // Refresh both: channel name/description (mutable fields) and a
+      // re-pushed shortcut with the current label.
+      if (existing.name != spec.title) {
+        existing.name = spec.title
+        existing.description = "Run completions for ${spec.title}"
+        nm.createNotificationChannel(existing)
+        pushConversationShortcut(spec)
+      }
+      return channelId
+    }
+
+    val deepLink = Uri.parse(
+      "agents-chat://chat?conversationId=${spec.conversationId}&agentId=${spec.agentId}&title=${Uri.encode(spec.title)}"
+    )
+    val intent = Intent(Intent.ACTION_VIEW, deepLink).setPackage(packageName)
+      .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+    val iconRes = resources.getIdentifier("notif_transparent", "drawable", packageName)
+      .takeIf { it != 0 } ?: applicationInfo.icon
+    pushConversationShortcut(spec)
     val channel = NotificationChannel(channelId, spec.title, NotificationManager.IMPORTANCE_HIGH)
       .apply {
         description = "Run completions for ${spec.title}"
