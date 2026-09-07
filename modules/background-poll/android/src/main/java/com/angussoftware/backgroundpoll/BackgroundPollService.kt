@@ -43,7 +43,7 @@ import java.util.concurrent.TimeUnit
  */
 class BackgroundPollService : Service() {
 
-  private data class ConversationSpec(val conversationId: String, val agentId: String, val title: String)
+  private data class ConversationSpec(val conversationId: String, val agentId: String, val title: String, val agentName: String = "Agent")
 
   private var scheduler: ScheduledExecutorService? = null
   private val notifiedRunIds: MutableSet<String> = HashSet()
@@ -107,7 +107,7 @@ class BackgroundPollService : Service() {
         val o = arr.optJSONObject(i) ?: return@mapNotNull null
         val cid = o.optString("conversationId")
         if (cid.isEmpty()) null
-        else ConversationSpec(cid, o.optString("agentId"), o.optString("title").ifEmpty { "Conversation" })
+        else ConversationSpec(cid, o.optString("agentId"), o.optString("title").ifEmpty { "Conversation" }, o.optString("agentName").ifEmpty { "Agent" })
       }
     } catch (e: Exception) {
       Log.e(TAG, "bad conversations JSON: ${e.message}")
@@ -374,7 +374,10 @@ class BackgroundPollService : Service() {
    */
   private fun personFor(spec: ConversationSpec): Person {
     personCache[spec.agentId]?.let { return it }
-    val builder = Person.Builder().setName(spec.title).setKey(spec.agentId)
+    // The Person is the AGENT (like a WhatsApp contact); the conversation
+    // title renders from the channel header. Both being the title showed
+    // "two different conversation titles" whenever vintages diverged.
+    val builder = Person.Builder().setName(spec.agentName).setKey(spec.agentId)
     avatarFor(spec)?.let { builder.setIcon(IconCompat.createWithBitmap(it)) }
     return builder.build().also { personCache[spec.agentId] = it }
   }

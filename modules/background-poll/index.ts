@@ -4,6 +4,8 @@ export interface NativeConversationSpec {
   conversationId: string;
   agentId: string;
   title: string;
+  /** Agent display name — the MessagingStyle Person (contact) name. */
+  agentName?: string;
 }
 
 export interface NativePollOptions {

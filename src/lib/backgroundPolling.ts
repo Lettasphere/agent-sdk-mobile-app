@@ -13,7 +13,7 @@
  * contexts (main context pauses timers on host pause; headless contexts
  * don't drive them on the bridgeless runtime) — see Lesson #716.
  */
-import { startPolling as nativeStartPolling, stopPolling as nativeStopPolling } from "../../modules/background-poll";
+import { startPolling as nativeStartPolling, stopPolling as nativeStopPolling, type NativeConversationSpec } from "../../modules/background-poll";
 import { listAgents, listConversations } from "./letta/api";
 import { NotificationMode, resolveEffectiveMode } from "./notifications";
 import type { Profile } from "./profiles/profiles";
@@ -58,7 +58,7 @@ export async function startBackgroundPollingForProfile(profile: Profile | null):
     const pollStartedAt = Date.now();
 
     // Enumerate agents → conversations, keep those resolving to ALL_MESSAGES.
-    const specs: { conversationId: string; agentId: string; title: string }[] = [];
+    const specs: NativeConversationSpec[] = [];
     try {
       const agents = await listAgents(conn);
       for (const agent of agents.slice(0, MAX_AGENTS)) {
@@ -70,6 +70,7 @@ export async function startBackgroundPollingForProfile(profile: Profile | null):
             conversationId: conv.id,
             agentId: agent.id,
             title: conv.title ?? "Conversation",
+            agentName: agent.name ?? "Agent",
           });
           if (specs.length >= MAX_CONVERSATIONS) break;
         }
