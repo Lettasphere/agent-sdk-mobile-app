@@ -391,7 +391,19 @@ class BackgroundPollService : Service() {
     val channelId = "conv-${spec.conversationId.hashCode()}"
     if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return CONVERSATIONS_CHANNEL_ID
     val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
-    if (nm.getNotificationChannel(channelId) != null) return channelId
+    val existing = nm.getNotificationChannel(channelId)
+    if (existing != null) {
+      // Renamed conversation: the channel name is frozen at first creation
+      // while the Person name is always current — the two diverge and one
+      // notification shows both titles. Channel name/description are the
+      // mutable fields; rewriting them updates the header in place.
+      if (existing.name != spec.title) {
+        existing.name = spec.title
+        existing.description = "Run completions for ${spec.title}"
+        nm.createNotificationChannel(existing)
+      }
+      return channelId
+    }
 
     val deepLink = Uri.parse(
       "agents-chat://chat?conversationId=${spec.conversationId}&agentId=${spec.agentId}&title=${Uri.encode(spec.title)}"
