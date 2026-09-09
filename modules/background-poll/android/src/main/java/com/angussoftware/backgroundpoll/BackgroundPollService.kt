@@ -439,13 +439,6 @@ class BackgroundPollService : Service() {
       return channelId
     }
 
-    val deepLink = Uri.parse(
-      "agents-chat://chat?conversationId=${spec.conversationId}&agentId=${spec.agentId}&title=${Uri.encode(spec.title)}"
-    )
-    val intent = Intent(Intent.ACTION_VIEW, deepLink).setPackage(packageName)
-      .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
-    val iconRes = resources.getIdentifier("notif_transparent", "drawable", packageName)
-      .takeIf { it != 0 } ?: applicationInfo.icon
     pushConversationShortcut(spec)
     val channel = NotificationChannel(channelId, spec.title, NotificationManager.IMPORTANCE_HIGH)
       .apply {
