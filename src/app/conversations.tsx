@@ -43,6 +43,7 @@ import {
 } from "../lib/letta/ChatSession";
 import { getSecret, type Profile } from "../lib/profiles/profiles";
 import { setStringAsync as copyToClipboard } from "expo-clipboard";
+import { haptic } from "../lib/haptics";
 import { useProfiles } from "../lib/profiles/ProfilesContext";
 import {
   NotificationMode,
@@ -453,14 +454,19 @@ export default function ConversationsScreen() {
     });
   };
 
+  const [startingNew, setStartingNew] = useState(false);
   const startNew = async () => {
-    if (!activeProfile) return;
+    if (!activeProfile || startingNew) return;
+    setStartingNew(true);
+    haptic.tap();
     try {
       const secret = (await getSecret(activeProfile.id)) ?? "";
       const id = await createConversation({ profile: activeProfile, secret }, agentId);
       router.push({ pathname: "/chat", params: { conversationId: id, agentId, agentName, title: "New conversation" } });
     } catch (e) {
       Alert.alert("Couldn't start a conversation", e instanceof Error ? e.message : undefined);
+    } finally {
+      setStartingNew(false);
     }
   };
 
@@ -545,10 +551,14 @@ export default function ConversationsScreen() {
                 ⚙
               </Text>
             </Touchable>
-            <Touchable accessibilityLabel="New conversation" accessibilityRole="button" onPress={startNew} style={styles.add}>
-              <Text role="title" tone="accent">
-                ＋
-              </Text>
+            <Touchable accessibilityLabel="New conversation" accessibilityRole="button" onPress={startNew} disabled={startingNew} style={styles.add}>
+              {startingNew ? (
+                <ActivityIndicator size="small" color={colors.accent} />
+              ) : (
+                <Text role="title" tone="accent">
+                  ＋
+                </Text>
+              )}
             </Touchable>
           </View>
         }

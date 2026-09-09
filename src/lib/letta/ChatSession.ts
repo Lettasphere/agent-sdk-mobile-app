@@ -335,7 +335,14 @@ export class ChatSession {
     // executes in the device's previous mode (approval walls on turns the
     // user believes are unrestricted). Restore is one AsyncStorage read +
     // one API call — the wait is imperceptible in practice.
+    if (this.permRestoreInFlight) {
+      console.log(`[PERM] ${this.permLogTag} SEND-WAIT ${this.conversationId.slice(-8)} (send gated on restore in flight)`);
+    }
     await this.permRestoreSettled;
+    if (this.closed) {
+      console.log(`[SEND] ${this.permLogTag} ${this.conversationId.slice(-8)} ABORT — session closed before send (leave-screen race) t=${Date.now()}`);
+      return;
+    }
     // Stamp the echo with the otid we hand to send() (SDK 0.7.0,
     // letta-agent-sdk#273): the persisted user message comes back under the same
     // otid, so the accumulator keys it to this row and the echo retires by
@@ -357,6 +364,7 @@ export class ChatSession {
     if (this.snapshot.run === "idle") this.commit(patch(this.snapshot, { run: "running" }));
     this.localRunInFlight = true;
     this.lastLocalStreamAt = Date.now();
+    console.log(`[SEND] ${this.permLogTag} ${this.conversationId.slice(-8)} SDK-DISPATCH otid=${otid.slice(-8)} t=${Date.now()}`);
     try {
       // The SDK takes either a string or a multimodal content array; images
       // lead so the model reads them as context for the instruction.
@@ -373,6 +381,7 @@ export class ChatSession {
       // the error report, and composer call sites fire-and-forget.
       this.markEcho(otid, { failed: true });
       const reason = e instanceof Error ? e.message : "Send failed.";
+      console.log(`[SEND] ${this.permLogTag} ${this.conversationId.slice(-8)} FAILED otid=${otid.slice(-8)} reason=${reason.slice(0, 80)} t=${Date.now()}`);
       this.commit(
         this.appendError(
           patch(this.project(this.snapshot), { run: "idle" }),
@@ -384,6 +393,7 @@ export class ChatSession {
     }
     this.pendingAttachments.delete(otid);
     this.markEcho(otid, { pending: false });
+    console.log(`[SEND] ${this.permLogTag} ${this.conversationId.slice(-8)} ACK otid=${otid.slice(-8)} t=${Date.now()}`);
     this.commit(this.project(this.snapshot));
   }
 
@@ -597,7 +607,7 @@ export class ChatSession {
 
   /** Change the runtime permission mode (SDK 0.3.0 #208 write, 0.3.1 #212 read). */
   async setPermissionMode(mode: PermissionMode, reason = "unspecified"): Promise<void> {
-    console.log(`[PERM] ${this.permLogTag} SET ${this.conversationId.slice(-8)} -> ${mode} (from ${this.snapshot.device?.permissionMode ?? "none"}) reason=${reason}`);
+    console.log(`[PERM] ${this.permLogTag} SET ${this.conversationId.slice(-8)} -> ${mode} (from ${this.snapshot.device?.permissionMode ?? "none"}) reason=${reason} t=${Date.now()}`);
     this.permRestoreInFlight = true;
     // Safety: if the server never confirms our mode (e.g. silent failure),
     // clear the flag after 5s so device status updates resume normally.
@@ -698,6 +708,7 @@ export class ChatSession {
   }
 
   private async doRestorePermissionMode(): Promise<void> {
+    console.log(`[PERM] ${this.permLogTag} RESTORE-START ${this.conversationId.slice(-8)} t=${Date.now()}`);
     setTimeout(() => { this.permRestoreInFlight = false; }, 5000);
     try {
       const resolved = await resolveEffectivePermission(
@@ -859,7 +870,11 @@ export class ChatSession {
     const serverMode = status.permissionMode as PermissionMode;
     const prevMode = snapshot.device?.permissionMode;
     if (serverMode !== prevMode) {
-      console.log(`[PERM] ${this.permLogTag} OBSERVE ${this.conversationId.slice(-8)} server=${serverMode} prev=${prevMode ?? "none"} restoreInFlight=${this.permRestoreInFlight}`);
+      console.log(`[PERM] ${this.permLogTag} OBSERVE ${this.conversationId.slice(-8)} server=${serverMode} prev=${prevMode ?? "none"} restoreInFlight=${this.permRestoreInFlight} local=${this.localRunInFlight} ext=${this.externalRunActive} t=${Date.now()}`);
+    }
+    // Log the resolution of any restore (did the server confirm our mode?)
+    if (this.permRestoreInFlight && serverMode === snapshot.device?.permissionMode && serverMode !== undefined) {
+      console.log(`[PERM] ${this.permLogTag} CONFIRM ${this.conversationId.slice(-8)} server=${serverMode} (restore acknowledged)`);
     }
     if (this.permRestoreInFlight) {
       // Keep our restored value until the server echoes it back.
@@ -974,6 +989,7 @@ export class ChatSession {
   }
 
   close(): void {
+    console.log(`[SEND] ${this.permLogTag} ${this.conversationId.slice(-8)} CLOSE t=${Date.now()}`);
     this.closed = true;
     this.stopExternalReconcile();
     if (this.heartbeatTimer) {
@@ -1282,6 +1298,14 @@ export class ChatSession {
       echoIdx++;
     }
     for (const e of undated) oldestFirst.push(e.item);
+    if (dated.length + undated.length > 1) {
+      // Multi-echo merge — log the placement decisions for the ordering bug
+      // (second message landing next to the first instead of in sequence).
+      const placement = [...dated, ...undated].map(
+        (e) => `${e.afterDate?.slice(11, 19) ?? "null"}:${("text" in e.item ? e.item.text : e.item.id).slice(0, 12)}`,
+      );
+      console.log(`[ORDER] ${this.permLogTag} ${this.conversationId.slice(-8)} echoes=${placement.join(" | ")}`);
+    }
     // Live local-run rows are the newest content — after everything. The
     // transcript ships OLDEST-FIRST: chat.tsx's groupToolRuns().reverse()
     // produces the newest-first array the inverted FlatList renders.
@@ -1343,7 +1367,11 @@ export class ChatSession {
    * (anchors went stale whenever rows inserted past them).
    */
   private appendLocal(snapshot: ChatSnapshot, item: TranscriptItem): ChatSnapshot {
-    this.localRows = [...this.localRows, { afterDate: this.externalStore.maxDate(), item }];
+    const stamp = this.externalStore.maxDate();
+    if (item.kind === "user") {
+      console.log(`[ORDER] ${this.permLogTag} ${this.conversationId.slice(-8)} ECHO stamp=${stamp?.slice(11, 19) ?? "null"} text=${"text" in item ? item.text.slice(0, 15) : "?"}`);
+    }
+    this.localRows = [...this.localRows, { afterDate: stamp, item }];
     return this.project(snapshot);
   }
 
