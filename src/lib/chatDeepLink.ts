@@ -66,10 +66,9 @@ export function parseChatLink(link: string): ChatLinkTarget | null {
  * container reports ready — nothing is dropped.
  */
 export function openChatWithBackStack(target: ChatLinkTarget): void {
-  router.dismissAll();
   if (!target.agentId) {
-    // Legacy notification payloads without agent context: land on the chat
-    // directly (previous behavior).
+    // Legacy notification payloads without agent context: push the chat
+    // on top of whatever is open (previous behavior — no stack wipe).
     router.push({
       pathname: "/chat",
       params: {
@@ -80,6 +79,7 @@ export function openChatWithBackStack(target: ChatLinkTarget): void {
     });
     return;
   }
+  router.dismissAll();
   router.push("/agents");
   router.push({
     pathname: "/conversations",
