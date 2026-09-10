@@ -471,6 +471,7 @@ export default function ChatScreen() {
         conversationId,
         title,
         success ? "Run complete" : "Run ended with an error",
+        { agentId: params.agentId, agentName: params.agentName },
       );
     },
     [params.agentId, activeProfile],
@@ -492,6 +493,7 @@ export default function ChatScreen() {
         params.conversationId,
         `${title} — message not sent`,
         `Tap to retry. ${reason}`,
+        { agentId: params.agentId, agentName: params.agentName },
       );
     },
     [params.conversationId, params.agentId, params.title, params.agentName, activeProfile],

@@ -13,6 +13,7 @@ import * as Notifications from "expo-notifications";
 
 import { ProfilesProvider, useProfiles } from "../lib/profiles/ProfilesContext";
 import { configureNotifications, ensureChannel } from "../lib/notificationPoster";
+import { openChatWithBackStack, takePendingChatLink } from "../lib/chatDeepLink";
 import { startBackgroundPollingForProfile } from "../lib/backgroundPolling";
 import { ThemeProvider, useTheme } from "../theme/ThemeProvider";
 
@@ -63,19 +64,40 @@ export default function RootLayout() {
       await configureNotifications();
       await ensureChannel();
     })();
+    // Cold-start deep link (conversation notification / shortcut): the
+    // initial URL was redirected to "/" in +native-intent and the target
+    // stashed. Rebuild the natural stack now that the navigator is ready.
+    // This effect runs after the navigation container mounted (bottom-up
+    // ordering), so the queued commands drain onto a ready container.
+    const pending = takePendingChatLink();
+    if (pending) {
+      openChatWithBackStack(pending);
+    }
     // Navigate to the conversation when a notification is tapped.
     const sub = Notifications.addNotificationResponseReceivedListener((response) => {
-      const conversationId = response.notification.request.content.data?.conversationId as string | undefined;
-      if (conversationId) {
-        // Use router.push with the conversation ID — the chat screen
-        // accepts conversationId as a search param.
-        // We need to also pass agentId/agentName for the notification
-        // to resolve the title. For now, just navigate with the ID.
-        const router = require("expo-router").router;
-        router.push({
-          pathname: "/chat",
-          params: { conversationId },
-        });
+      const data = response.notification.request.content.data as
+        | { conversationId?: string; agentId?: string; agentName?: string }
+        | undefined;
+      if (data?.conversationId) {
+        // Rebuild the natural stack (servers -> agents -> conversations ->
+        // chat) so hardware back walks the chain instead of exiting the app.
+        // Legacy notifications carry only conversationId — no agentId to
+        // build the middle screens, so land on chat directly (old behavior).
+        if (data.agentId) {
+          openChatWithBackStack({
+            conversationId: data.conversationId,
+            agentId: data.agentId,
+            agentName: data.agentName,
+          });
+        } else {
+          // Same late-require pattern as before: _layout runs before the
+          // router module would be safe to import at top level.
+          const router = require("expo-router").router;
+          router.push({
+            pathname: "/chat",
+            params: { conversationId: data.conversationId },
+          });
+        }
       }
     });
     return () => sub.remove();

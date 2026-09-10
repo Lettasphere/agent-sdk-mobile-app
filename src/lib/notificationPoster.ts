@@ -63,6 +63,7 @@ export async function postConversationNotification(
   conversationId: string,
   title: string,
   text: string,
+  extra?: { agentId?: string; agentName?: string },
 ): Promise<void> {
   const granted = await canPost();
   if (!granted) return;
@@ -71,7 +72,7 @@ export async function postConversationNotification(
     content: {
       title,
       body: text,
-      data: { conversationId },
+      data: { conversationId, ...extra },
     },
     trigger: null, // Immediate
   });

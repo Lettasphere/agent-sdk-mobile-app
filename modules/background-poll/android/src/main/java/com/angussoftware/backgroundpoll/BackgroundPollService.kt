@@ -393,7 +393,7 @@ class BackgroundPollService : Service() {
   /** Push/refresh the long-lived conversation shortcut (label = current title). */
   private fun pushConversationShortcut(spec: ConversationSpec) {
     val deepLink = Uri.parse(
-      "agents-chat://chat?conversationId=${spec.conversationId}&agentId=${spec.agentId}&title=${Uri.encode(spec.title)}"
+      "agents-chat://chat?conversationId=${spec.conversationId}&agentId=${spec.agentId}&agentName=${Uri.encode(spec.agentName)}&title=${Uri.encode(spec.title)}"
     )
     val intent = Intent(Intent.ACTION_VIEW, deepLink).setPackage(packageName)
       .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
@@ -462,7 +462,7 @@ class BackgroundPollService : Service() {
   private fun postCompletionNotification(spec: ConversationSpec, bodyText: String) {
     ensureChannels()
     val deepLink = Uri.parse(
-      "agents-chat://chat?conversationId=${spec.conversationId}&agentId=${spec.agentId}&title=${Uri.encode(spec.title)}"
+      "agents-chat://chat?conversationId=${spec.conversationId}&agentId=${spec.agentId}&agentName=${Uri.encode(spec.agentName)}&title=${Uri.encode(spec.title)}"
     )
     val intent = Intent(Intent.ACTION_VIEW, deepLink).setPackage(packageName)
       .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
