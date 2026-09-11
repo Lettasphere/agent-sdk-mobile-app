@@ -23,6 +23,7 @@ import { toImageContent, type Attachment } from "./attachments";
 import type { Profile } from "../profiles/profiles";
 import { getConversationModel, isAuthError, listComputers, listConversationMessages, listConversationRuns, sdkClient } from "./api";
 import { ExternalTranscriptStore } from "./ExternalTranscriptStore";
+import { mergeTranscript } from "./echoMerge";
 import { emptyChat, type ApprovalRequest, type ChatSnapshot, type PermissionMode, type ToolStatus, type TranscriptItem } from "./model";
 import { patch } from "./mockSession";
 import { contentToText, formatToolInput } from "./toolText";
@@ -114,12 +115,20 @@ export class ChatSession {
    */
   private accumulator: TranscriptAccumulator = createTranscriptAccumulator();
   /**
-   * Rows no server message can produce (an echo still in flight, an error),
-   * each anchored to the number of accumulator rows that existed when it was
-   * created — so it renders where it happened instead of floating to the end
-   * once the reply streams in.
+   * Rows no server message can produce (an echo still in flight, an error).
+   * Each carries placement anchors for echoMerge: a date anchor (newest
+   * store record at send time) and, when live stream rows were visible, an
+   * identity anchor to the newest of them — the store lags REST persistence
+   * by seconds, so the date anchor alone let a second send stamp a stale
+   * position and render beside the first message instead of after the
+   * visible reply (the message-ordering bug).
    */
-  private localRows: { afterDate: string | null; item: TranscriptItem }[] = [];
+  private localRows: {
+    afterDate: string | null;
+    anchorOtid?: string;
+    anchorUuid?: string;
+    item: TranscriptItem;
+  }[] = [];
   /** otids of echoes still awaiting their persisted counterpart. */
   private echoOtids = new Set<string>();
   /** Reasoning think time, keyed by accumulator row key. */
@@ -1265,7 +1274,6 @@ export class ChatSession {
     // dropped from the live projection — only genuinely-live stream rows
     // (a local run in flight) render from the accumulator.
     const externalEntries = this.externalStore.itemsWithDatesRev();
-    const liveItems = projectRows(rows, state).filter((it) => this.liveStreamKeys.has(it.id));
 
     // An echo retires the moment the store holds the persisted message under
     // the same otid — identity, not a guess about matching text.
@@ -1274,42 +1282,39 @@ export class ChatSession {
       ({ item }) => !(item.kind === "user" && this.echoOtids.has(item.id) && storeUserOtids.has(item.id)),
     );
 
-    // Merge by date: store records are the backbone; each echo slots in after
-    // the records that existed when it was sent (its afterDate stamp) and
-    // before anything newer. An echo sent before the store had any records
-    // (afterDate null — fast send during hydration) belongs at the NEWEST
-    // edge: null sorts first lexicographically, so undated echoes are placed
-    // explicitly after all external entries. Assembled OLDEST-FIRST; chat.tsx
-    // reverses for the inverted FlatList.
-    const oldestFirst: TranscriptItem[] = [];
-    const dated = this.localRows.filter((e) => e.afterDate !== null);
-    const undated = this.localRows.filter((e) => e.afterDate === null);
-    dated.sort((a, b) => (a.afterDate ?? "").localeCompare(b.afterDate ?? ""));
-    let echoIdx = 0;
-    for (const entry of externalEntries) {
-      while (echoIdx < dated.length && (dated[echoIdx]!.afterDate ?? "") < entry.date) {
-        oldestFirst.push(dated[echoIdx]!.item);
-        echoIdx++;
-      }
-      oldestFirst.push(entry.item);
-    }
-    while (echoIdx < dated.length) {
-      oldestFirst.push(dated[echoIdx]!.item);
-      echoIdx++;
-    }
-    for (const e of undated) oldestFirst.push(e.item);
-    if (dated.length + undated.length > 1) {
-      // Multi-echo merge — log the placement decisions for the ordering bug
-      // (second message landing next to the first instead of in sequence).
-      const placement = [...dated, ...undated].map(
-        (e) => `${e.afterDate?.slice(11, 19) ?? "null"}:${("text" in e.item ? e.item.text : e.item.id).slice(0, 12)}`,
+    // Live rows retire once the store holds the same message uuid — the
+    // stream row (rendered at the newest edge) and the store record (rendered
+    // at its date position) are the same content; keeping both double-renders
+    // the reply once reconcile lands it.
+    const storeUuids = this.externalStore.uuids();
+    const liveItems = projectRows(rows, state)
+      .filter((it) => this.liveStreamKeys.has(it.id))
+      .filter((it) => {
+        const row = rows.find((r) => r.key === it.id);
+        return !(row?.uuid && storeUuids.has(row.uuid));
+      });
+
+    const oldestFirst = mergeTranscript(
+      externalEntries,
+      this.localRows,
+      liveItems.map((it) => {
+        const row = rows.find((r) => r.key === it.id);
+        return {
+          item: it,
+          ...(row?.uuid ? { uuid: row.uuid } : {}),
+          ...(row?.otid ? { otid: row.otid } : {}),
+        };
+      }),
+    );
+    if (this.localRows.length > 1) {
+      const placement = this.localRows.map(
+        (e) =>
+          `${e.afterDate?.slice(11, 19) ?? "null"}/${e.anchorOtid?.slice(-6) ?? e.anchorUuid?.slice(-6) ?? "none"}:${("text" in e.item ? e.item.text : e.item.id).slice(0, 12)}`,
       );
       console.log(`[ORDER] ${this.permLogTag} ${this.conversationId.slice(-8)} echoes=${placement.join(" | ")}`);
     }
-    // Live local-run rows are the newest content — after everything. The
-    // transcript ships OLDEST-FIRST: chat.tsx's groupToolRuns().reverse()
+    // The transcript ships OLDEST-FIRST: chat.tsx's groupToolRuns().reverse()
     // produces the newest-first array the inverted FlatList renders.
-    oldestFirst.push(...liveItems);
 
     return patch(snapshot, { transcript: oldestFirst });
   }
@@ -1368,10 +1373,30 @@ export class ChatSession {
    */
   private appendLocal(snapshot: ChatSnapshot, item: TranscriptItem): ChatSnapshot {
     const stamp = this.externalStore.maxDate();
+    // Identity anchor: the newest live stream row visible NOW. The store's
+    // newest date can lag the visible reply by seconds (REST persistence
+    // lag), so anchoring by date alone let consecutive sends stamp identical
+    // stale positions — the second echo rendered beside the first message
+    // instead of after the reply. Anchoring to the newest live row's
+    // otid/uuid pins the echo after everything the user can already see.
+    const liveRows = this.accumulator.rows().filter((r) => this.liveStreamKeys.has(r.key));
+    const newestLive = liveRows[liveRows.length - 1];
+    const anchorOtid = newestLive?.otid ?? undefined;
+    const anchorUuid = newestLive?.uuid ?? undefined;
     if (item.kind === "user") {
-      console.log(`[ORDER] ${this.permLogTag} ${this.conversationId.slice(-8)} ECHO stamp=${stamp?.slice(11, 19) ?? "null"} text=${"text" in item ? item.text.slice(0, 15) : "?"}`);
+      console.log(
+        `[ORDER] ${this.permLogTag} ${this.conversationId.slice(-8)} ECHO stamp=${stamp?.slice(11, 19) ?? "null"} anchor=${anchorOtid ?? anchorUuid ?? "none"} text=${"text" in item ? item.text.slice(0, 15) : "?"}`,
+      );
     }
-    this.localRows = [...this.localRows, { afterDate: stamp, item }];
+    this.localRows = [
+      ...this.localRows,
+      {
+        afterDate: stamp,
+        ...(anchorOtid ? { anchorOtid } : {}),
+        ...(anchorUuid ? { anchorUuid } : {}),
+        item,
+      },
+    ];
     return this.project(snapshot);
   }
 

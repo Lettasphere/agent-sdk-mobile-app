@@ -169,8 +169,13 @@ export class ExternalTranscriptStore {
   }
 
   /** Render-ready items in date order; tool results folded into their calls. */
-  itemsWithDatesRev(): Array<{ date: string; item: TranscriptItem }> {
-    const out: Array<{ date: string; item: TranscriptItem }> = [];
+  itemsWithDatesRev(): Array<{
+    date: string;
+    item: TranscriptItem;
+    uuid?: string;
+    otid?: string;
+  }> {
+    const out: Array<{ date: string; item: TranscriptItem; uuid?: string; otid?: string }> = [];
     const resultsByCall = new Map<string, { text: string; isError: boolean }>();
     for (const rec of this.rows()) {
       if (rec.kind === "tool" && rec.toolResult !== undefined && rec.toolCallId) {
@@ -179,11 +184,11 @@ export class ExternalTranscriptStore {
     }
     for (const rec of this.rows()) {
       if (rec.kind === "user") {
-        out.push({ date: rec.date, item: { kind: "user", id: rec.id, text: rec.text } });
+        out.push({ date: rec.date, item: { kind: "user", id: rec.id, text: rec.text }, otid: rec.otid });
       } else if (rec.kind === "assistant") {
-        out.push({ date: rec.date, item: { kind: "assistant", id: rec.id, text: rec.text } });
+        out.push({ date: rec.date, item: { kind: "assistant", id: rec.id, text: rec.text }, uuid: rec.id });
       } else if (rec.kind === "reasoning") {
-        out.push({ date: rec.date, item: { kind: "reasoning", id: rec.id, text: rec.text, seconds: 0 } });
+        out.push({ date: rec.date, item: { kind: "reasoning", id: rec.id, text: rec.text, seconds: 0 }, uuid: rec.id });
       } else if (rec.kind === "tool") {
         // Bare results merge into their call card — not separate rows.
         if (rec.toolResult !== undefined) continue;
@@ -200,9 +205,17 @@ export class ExternalTranscriptStore {
             status: result ? (result.isError ? "error" : "success") : "success",
             ...(result ? { result: result.text } : {}),
           },
+          uuid: rec.id,
         });
       }
     }
+    return out;
+  }
+
+  /** All message uuids present — live-row retirement membership. */
+  uuids(): Set<string> {
+    const out = new Set<string>();
+    for (const rec of this.byId.values()) out.add(rec.id);
     return out;
   }
 }
