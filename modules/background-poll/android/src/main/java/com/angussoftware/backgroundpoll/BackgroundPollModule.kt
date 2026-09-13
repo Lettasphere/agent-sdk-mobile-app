@@ -28,6 +28,7 @@ class BackgroundPollModule : Module() {
         val notified = (options["notifiedRunIds"] as? List<*>)?.filterIsInstance<String>() ?: emptyList()
         putStringArrayListExtra("notifiedRunIds", ArrayList(notified))
         putExtra("pollIntervalMs", (options["pollIntervalMs"] as? Number)?.toLong() ?: 20_000L)
+        putExtra("avatarShape", options["avatarShape"] as? String ?: "circle")
       }
       // Replace any previous polling instance.
       context.stopService(Intent(context, BackgroundPollService::class.java))

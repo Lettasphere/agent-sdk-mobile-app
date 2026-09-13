@@ -42,6 +42,9 @@ import {
   loadAppDefault,
   resolveMode,
   resetServerDownstreamNotifications,
+  loadAvatarShape,
+  saveAvatarShape,
+  type AvatarShape,
 } from "../lib/notifications";
 import {
   PermissionCascadeMode,
@@ -176,6 +179,9 @@ export default function ProfileEditorScreen() {
   // Server-level settings sheet (only for existing profiles).
   const serverSettingsRef = useRef<BottomSheetModal>(null);
 
+  // Notification avatar shape (global display preference, existing profiles sheet).
+  const [avatarShape, setAvatarShape] = useState<AvatarShape>("circle");
+
   // Server-level notification default (only for existing profiles).
   const [serverNotif, setServerNotif] = useState<NotificationMode>(NotificationMode.APP_DEFAULT);
   const [serverNotifResolved, setServerNotifResolved] = useState<NotificationMode>(NotificationMode.OFF);
@@ -195,6 +201,7 @@ export default function ProfileEditorScreen() {
           loadAppPermDefault(),
         ]);
         setServerNotif(serverNotifSetting);
+        setAvatarShape(await loadAvatarShape());
         setServerNotifResolved(resolveMode(NotificationMode.APP_DEFAULT, serverNotifSetting, appNotifSetting, appNotifSetting));
         setServerPerm(serverPermSetting);
         setServerPermResolved(resolvePermission(PermissionCascadeMode.APP_DEFAULT, PermissionCascadeMode.AGENT_DEFAULT, serverPermSetting, appPermSetting));
@@ -615,6 +622,25 @@ export default function ProfileEditorScreen() {
               Reset all downstream permissions
             </Text>
           </Touchable>
+
+          <View style={styles.sectionDivider} />
+
+          <Dropdown
+            label="Notification avatar shape"
+            value={avatarShape}
+            options={[
+              { value: "circle" as AvatarShape, label: "Circle", detail: "Rounded — matches the app" },
+              { value: "squircle" as AvatarShape, label: "Squircle", detail: "Continuously rounded square" },
+              { value: "square" as AvatarShape, label: "Square", detail: "Raw profile picture" },
+            ]}
+            onSelect={(option) => {
+              setAvatarShape(option);
+              void saveAvatarShape(option);
+            }}
+          />
+          <Text role="sub" ink={3} style={styles.permHint}>
+            Shape of the agent avatar on conversation notifications. Applies from the next notification.
+          </Text>
         </Sheet>
       ) : null}
     </Screen>

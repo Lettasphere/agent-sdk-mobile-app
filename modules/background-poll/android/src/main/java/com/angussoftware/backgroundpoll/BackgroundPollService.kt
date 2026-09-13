@@ -47,6 +47,8 @@ class BackgroundPollService : Service() {
 
   private var scheduler: ScheduledExecutorService? = null
   private val notifiedRunIds: MutableSet<String> = HashSet()
+  /** Notification avatar shape: "circle" (default), "squircle", or "square". */
+  private var avatarShape = "circle"
   /** Run id -> first-seen wall clock, for runs whose reply text is still lagging. */
   private val pendingContent = mutableMapOf<String, Long>()
   private var conversations: List<ConversationSpec> = emptyList()
@@ -75,6 +77,16 @@ class BackgroundPollService : Service() {
     token = intent.getStringExtra("token") ?: ""
     pollStartedAt = intent.getLongExtra("pollStartedAt", System.currentTimeMillis())
     pollIntervalMs = intent.getLongExtra("pollIntervalMs", 20_000L)
+    val newShape = intent.getStringExtra("avatarShape") ?: "circle"
+    if (newShape != avatarShape) {
+      // Icon caches (person, shortcut) hold masked bitmaps — a shape change
+      // must invalidate them so the next notification renders the new mask.
+      avatarShape = newShape
+      personCache.clear()
+      try {
+        ShortcutManagerCompat.removeAllDynamicShortcuts(this)
+      } catch (_: Exception) {}
+    }
     // Seed dedup with run IDs the JS stream already notified.
     notifiedRunIds.clear()
     notifiedRunIds.addAll(intent.getStringArrayListExtra("notifiedRunIds") ?: ArrayList())
@@ -326,6 +338,80 @@ class BackgroundPollService : Service() {
     return fetchAvatarFromNetwork(spec)
   }
 
+  /**
+   * Profile picture masked to the configured notification shape: circle
+   * (default — matches the app's rounded avatars), squircle, or the raw
+   * square. Masked copies only — the fetch/disk cache keeps raw bitmaps so
+   * a shape change applies without a refetch. A separate small cache keyed
+   * by agentId+shape avoids re-masking on every notification.
+   */
+  private val maskedIconCache = HashMap<String, Bitmap>()
+  private fun maskedAvatarFor(spec: ConversationSpec): Bitmap? {
+    val key = "${spec.agentId}:$avatarShape"
+    maskedIconCache[key]?.let { return it }
+    val raw = avatarFor(spec) ?: return null
+    val masked = when (avatarShape) {
+      "square" -> raw
+      "squircle" -> maskToSuperellipse(raw)
+      else -> maskToCircle(raw)
+    }
+    maskedIconCache[key] = masked
+    return masked
+  }
+
+  /** Circular mask via Porter-Duff destination-in — the standard approach. */
+  private fun maskToCircle(src: Bitmap): Bitmap {
+    val size = minOf(src.width, src.height)
+    val out = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+    val canvas = android.graphics.Canvas(out)
+    val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
+    // Center-crop to the square canvas first, then punch the circle.
+    val offX = (src.width - size) / 2
+    val offY = (src.height - size) / 2
+    paint.shader = android.graphics.BitmapShader(src, android.graphics.Shader.TileMode.CLAMP, android.graphics.Shader.TileMode.CLAMP)
+    val matrix = android.graphics.Matrix()
+    matrix.setTranslate(-offX.toFloat(), -offY.toFloat())
+    paint.shader.setLocalMatrix(matrix)
+    canvas.drawCircle(size / 2f, size / 2f, size / 2f, paint)
+    return out
+  }
+
+  /**
+   * Squircle (superellipse n=4) mask — the "continuously rounded" shape
+   * modern launchers use. Built as a Path: parametric superellipse points
+   * stitched with line segments (smooth at icon sizes).
+   */
+  private fun maskToSuperellipse(src: Bitmap): Bitmap {
+    val size = minOf(src.width, src.height)
+    val out = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+    val canvas = android.graphics.Canvas(out)
+    val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
+    val offX = (src.width - size) / 2
+    val offY = (src.height - size) / 2
+    paint.shader = android.graphics.BitmapShader(src, android.graphics.Shader.TileMode.CLAMP, android.graphics.Shader.TileMode.CLAMP)
+    val matrix = android.graphics.Matrix()
+    matrix.setTranslate(-offX.toFloat(), -offY.toFloat())
+    paint.shader.setLocalMatrix(matrix)
+    val n = 4.0
+    val half = size / 2.0
+    val path = android.graphics.Path()
+    var first = true
+    val steps = 96
+    for (i in 0 until steps) {
+      val theta = 2.0 * Math.PI * i / steps
+      // |cos|^(-2/n)-style parametric superellipse: x = a·sign(cos)|cos|^(2/n)
+      val ct = Math.cos(theta)
+      val st = Math.sin(theta)
+      val x = half * Math.signum(ct) * Math.pow(Math.abs(ct), 2.0 / n) + half
+      val y = half * Math.signum(st) * Math.pow(Math.abs(st), 2.0 / n) + half
+      if (first) { path.moveTo(x.toFloat(), y.toFloat()); first = false }
+      else path.lineTo(x.toFloat(), y.toFloat())
+    }
+    path.close()
+    canvas.drawPath(path, paint)
+    return out
+  }
+
   private fun avatarFile(agentId: String): File {
     val dir = File(filesDir, "avatars")
     if (!dir.exists()) dir.mkdirs()
@@ -378,7 +464,7 @@ class BackgroundPollService : Service() {
     // title renders from the channel header. Both being the title showed
     // "two different conversation titles" whenever vintages diverged.
     val builder = Person.Builder().setName(spec.agentName).setKey(spec.agentId)
-    avatarFor(spec)?.let { builder.setIcon(IconCompat.createWithBitmap(it)) }
+    maskedAvatarFor(spec)?.let { builder.setIcon(IconCompat.createWithBitmap(it)) }
     return builder.build().also { personCache[spec.agentId] = it }
   }
 
@@ -399,7 +485,7 @@ class BackgroundPollService : Service() {
       .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
     val iconRes = resources.getIdentifier("notif_transparent", "drawable", packageName)
       .takeIf { it != 0 } ?: applicationInfo.icon
-    val avatar = avatarFor(spec)
+    val avatar = maskedAvatarFor(spec)
     val shortcut = ShortcutInfoCompat.Builder(this, spec.conversationId)
       .setShortLabel(spec.title)
       .setLongLabel(spec.title)
@@ -474,7 +560,7 @@ class BackgroundPollService : Service() {
     // (profile picture, or initial-letter circle without one) on the LEFT —
     // same as SMS/WhatsApp rows. The transparent small icon keeps any
     // leftover app-badge invisible.
-    val avatar = avatarFor(spec)
+    val avatar = maskedAvatarFor(spec)
     val channelId = ensureConversationChannel(spec, avatar)
     val person = personFor(spec)
     // One UI's collapsed row renders the LARGE icon as its left-side image;

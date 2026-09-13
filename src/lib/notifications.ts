@@ -126,6 +126,20 @@ export async function saveServerSetting(profileId: string, mode: NotificationMod
   await AsyncStorage.setItem(SERVER_KEY(profileId), mode);
 }
 
+// --- Notification avatar shape (global display preference) ---
+
+export type AvatarShape = "circle" | "squircle" | "square";
+const SHAPE_KEY = "letta.notif.avatarShape";
+
+export async function loadAvatarShape(): Promise<AvatarShape> {
+  const v = await AsyncStorage.getItem(SHAPE_KEY);
+  return v === "squircle" || v === "square" ? v : "circle";
+}
+
+export async function saveAvatarShape(shape: AvatarShape): Promise<void> {
+  await AsyncStorage.setItem(SHAPE_KEY, shape);
+}
+
 /**
  * Convenience: resolve the effective mode for a conversation, loading all
  * cascade levels from AsyncStorage. Agent and server levels default to

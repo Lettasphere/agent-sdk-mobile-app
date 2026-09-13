@@ -15,7 +15,7 @@
  */
 import { startPolling as nativeStartPolling, stopPolling as nativeStopPolling, type NativeConversationSpec } from "../../modules/background-poll";
 import { listAgents, listConversations } from "./letta/api";
-import { NotificationMode, resolveEffectiveMode } from "./notifications";
+import { NotificationMode, resolveEffectiveMode, loadAvatarShape } from "./notifications";
 import type { Profile } from "./profiles/profiles";
 import { getSecret } from "./profiles/profiles";
 
@@ -56,6 +56,7 @@ export async function startBackgroundPollingForProfile(profile: Profile | null):
     }
     const conn = { profile, secret };
     const pollStartedAt = Date.now();
+    const avatarShape = await loadAvatarShape();
 
     // Enumerate agents → conversations, keep those resolving to ALL_MESSAGES.
     const specs: NativeConversationSpec[] = [];
@@ -98,6 +99,7 @@ export async function startBackgroundPollingForProfile(profile: Profile | null):
       token: secret,
       pollStartedAt,
       notifiedRunIds: [],
+      avatarShape,
     });
   } finally {
     startInFlight = false;

@@ -21,6 +21,8 @@ export interface NativePollOptions {
   notifiedRunIds: string[];
   /** Poll interval in ms (default 20_000). */
   pollIntervalMs?: number;
+  /** Notification avatar shape: "circle" (default), "squircle", or "square". */
+  avatarShape?: string;
 }
 
 declare class BackgroundPollNativeModule {
@@ -31,6 +33,7 @@ declare class BackgroundPollNativeModule {
     pollStartedAt: number;
     notifiedRunIds: string[];
     pollIntervalMs?: number;
+    avatarShape?: string;
   }): Promise<void>;
   stopPolling(): Promise<void>;
   setVisibleConversation(conversationId: string | null): Promise<void>;
@@ -48,6 +51,7 @@ export function startPolling(options: NativePollOptions): Promise<void> {
     pollStartedAt: options.pollStartedAt,
     notifiedRunIds: options.notifiedRunIds,
     pollIntervalMs: options.pollIntervalMs,
+    avatarShape: options.avatarShape,
   });
 }
 
