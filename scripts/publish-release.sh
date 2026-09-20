@@ -69,7 +69,8 @@ print(f"app.json + build.gradle → {version} (code {vcode})")
 PY
 
 if [[ -n "$(git status --porcelain app.json android/app/build.gradle)" ]]; then
-  git add app.json android/app/build.gradle
+  git add app.json
+  git add -f android/app/build.gradle
   git -c user.name="coda-rho-bot" -c user.email="coda-github@mail.angussoftware.com" commit -m "chore: release v$NEW_VERSION"
 fi
 
