@@ -21,7 +21,7 @@
 
 set -euo pipefail
 
-REPO_API="https://git.angussoftware.dev/api/v1/repos/coda/agents-chat"
+REPO_API="https://git.angussoftware.dev/api/v1/repos/coda/agents-chat-releases"
 APK_DIR="android/app/build/outputs/apk/release"
 SLUG="agents-chat"
 

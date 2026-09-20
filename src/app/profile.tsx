@@ -46,6 +46,14 @@ import {
   saveAvatarShape,
   type AvatarShape,
 } from "../lib/notifications";
+import * as Application from "expo-application";
+import * as Progress from "react-native-progress";
+import {
+  type PendingUpdate,
+  subscribePendingUpdate,
+  checkForUpdate,
+  downloadAndInstall,
+} from "../lib/updater";
 import {
   PermissionCascadeMode,
   type PermissionCascadeValue,
@@ -182,6 +190,13 @@ export default function ProfileEditorScreen() {
   // Notification avatar shape (global display preference, existing profiles sheet).
   const [avatarShape, setAvatarShape] = useState<AvatarShape>("circle");
 
+  // App self-update state.
+  const [update, setUpdate] = useState<PendingUpdate | null>(null);
+  const [updateBusy, setUpdateBusy] = useState(false);
+  const [updateError, setUpdateError] = useState<string | null>(null);
+  const [updateProgress, setUpdateProgress] = useState(0);
+  const appVersion = Application.nativeApplicationVersion ?? "?";
+
   // Server-level notification default (only for existing profiles).
   const [serverNotif, setServerNotif] = useState<NotificationMode>(NotificationMode.APP_DEFAULT);
   const [serverNotifResolved, setServerNotifResolved] = useState<NotificationMode>(NotificationMode.OFF);
@@ -202,6 +217,12 @@ export default function ProfileEditorScreen() {
         ]);
         setServerNotif(serverNotifSetting);
         setAvatarShape(await loadAvatarShape());
+        const unsub = subscribePendingUpdate(setUpdate);
+        const check = await checkForUpdate().catch(() => null);
+        if (check?.updateAvailable) {
+          setUpdate({ version: check.manifest!.version, manifest: check.manifest! });
+        }
+        return unsub;
         setServerNotifResolved(resolveMode(NotificationMode.APP_DEFAULT, serverNotifSetting, appNotifSetting, appNotifSetting));
         setServerPerm(serverPermSetting);
         setServerPermResolved(resolvePermission(PermissionCascadeMode.APP_DEFAULT, PermissionCascadeMode.AGENT_DEFAULT, serverPermSetting, appPermSetting));
@@ -641,6 +662,53 @@ export default function ProfileEditorScreen() {
           <Text role="sub" ink={3} style={styles.permHint}>
             Shape of the agent avatar on conversation notifications. Applies from the next notification.
           </Text>
+
+          <View style={styles.sectionDivider} />
+
+          <Text role="bodyEm">App update</Text>
+          {updateBusy ? (
+            <View style={{ marginTop: 12 }}>
+              <Text role="body">Downloading update…</Text>
+              <Progress.Bar
+                progress={updateProgress}
+                width={null}
+                color={colors.accent}
+                style={{ marginTop: 8 }}
+              />
+            </View>
+          ) : update ? (
+            <View style={{ marginTop: 12 }}>
+              <Text role="body">
+                Version {update.version} is available (installed: {appVersion}).
+              </Text>
+              <Touchable
+                accessibilityRole="button"
+                accessibilityLabel={`Install update ${update.version}`}
+                disabled={updateBusy}
+                onPress={() => {
+                  setUpdateError(null);
+                  setUpdateBusy(true);
+                  downloadAndInstall(update.manifest, (pct) => setUpdateProgress(pct))
+                    .catch((e) => setUpdateError(e instanceof Error ? e.message : String(e)))
+                    .finally(() => setUpdateBusy(false));
+                }}
+                style={styles.resetBtn}
+              >
+                <Text role="body" tone="accent">
+                  Download & install {update.version}
+                </Text>
+              </Touchable>
+              {updateError ? (
+                <Text role="sub" tone="danger" style={{ marginTop: 8 }}>
+                  {updateError}
+                </Text>
+              ) : null}
+            </View>
+          ) : (
+            <Text role="body" style={{ marginTop: 12 }}>
+              Up to date (version {appVersion}). Checks happen automatically in the background.
+            </Text>
+          )}
         </Sheet>
       ) : null}
     </Screen>
