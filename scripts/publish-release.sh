@@ -106,8 +106,9 @@ upload_asset() {
 APK_URL=$(upload_asset "$SLUG-$NEW_VERSION.apk" "$APK" "application/vnd.android.package-archive")
 [[ "$APK_URL" == https://* ]] || die "apk upload failed: $APK_URL"
 
+RELEASED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 printf '{"version":"%s","versionCode":%d,"apk":"%s","size":%d,"releasedAt":"%s"}\n' \
-  "$NEW_VERSION" "$VERSION_CODE" "$APK_URL" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > /tmp/ac-latest.json
+  "$NEW_VERSION" "$VERSION_CODE" "$APK_URL" "$RELEASED_AT" > /tmp/ac-latest.json
 MANIFEST_URL=$(upload_asset "latest.json" /tmp/ac-latest.json "application/json")
 [[ "$MANIFEST_URL" == https://* ]] || die "manifest upload failed: $MANIFEST_URL"
 
