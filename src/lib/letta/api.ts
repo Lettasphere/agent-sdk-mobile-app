@@ -481,10 +481,11 @@ export async function getConversationModel(
     const a = agent.model_settings as {
       reasoning_effort?: string | null;
       effort?: string | null;
+      reasoning?: { reasoning_effort?: string | null } | null;
     } | null;
     return {
       model: agent.model ?? null,
-      reasoningEffort: a?.reasoning_effort ?? a?.effort ?? null,
+      reasoningEffort: a?.reasoning_effort ?? a?.reasoning?.reasoning_effort ?? a?.effort ?? null,
       title: body.summary ?? null,
     };
   }
