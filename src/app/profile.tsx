@@ -210,28 +210,33 @@ export default function ProfileEditorScreen() {
 
   useEffect(() => {
     if (existing) void hasSecret(existing.id).then(setStoredSecret);
-    if (existing) {
-      void (async () => {
-        const [serverNotifSetting, appNotifSetting, serverPermSetting, appPermSetting] = await Promise.all([
-          loadServerSetting(existing.id),
-          loadAppDefault(),
-          loadServerPerm(existing.id),
-          loadAppPermDefault(),
-        ]);
-        setServerNotif(serverNotifSetting);
-        setAvatarShape(await loadAvatarShape());
-        setUpdateTokenState(await loadUpdateToken());
-        const unsub = subscribePendingUpdate(setUpdate);
-        const check = await checkForUpdate().catch(() => null);
-        if (check?.updateAvailable) {
-          setUpdate({ version: check.manifest!.version, manifest: check.manifest! });
-        }
-        return unsub;
-        setServerNotifResolved(resolveMode(NotificationMode.APP_DEFAULT, serverNotifSetting, appNotifSetting, appNotifSetting));
-        setServerPerm(serverPermSetting);
-        setServerPermResolved(resolvePermission(PermissionCascadeMode.APP_DEFAULT, PermissionCascadeMode.AGENT_DEFAULT, serverPermSetting, appPermSetting));
-      })();
-    }
+    if (!existing) return;
+    let unsub: (() => void) | null = null;
+    let cancelled = false;
+    void (async () => {
+      const [serverNotifSetting, appNotifSetting, serverPermSetting, appPermSetting] = await Promise.all([
+        loadServerSetting(existing.id),
+        loadAppDefault(),
+        loadServerPerm(existing.id),
+        loadAppPermDefault(),
+      ]);
+      if (cancelled) return;
+      setServerNotif(serverNotifSetting);
+      setServerNotifResolved(resolveMode(NotificationMode.APP_DEFAULT, serverNotifSetting, appNotifSetting, appNotifSetting));
+      setServerPerm(serverPermSetting);
+      setServerPermResolved(resolvePermission(PermissionCascadeMode.APP_DEFAULT, PermissionCascadeMode.AGENT_DEFAULT, serverPermSetting, appPermSetting));
+      setAvatarShape(await loadAvatarShape());
+      setUpdateTokenState(await loadUpdateToken());
+      unsub = subscribePendingUpdate(setUpdate);
+      const check = await checkForUpdate().catch(() => null);
+      if (!cancelled && check?.updateAvailable) {
+        setUpdate({ version: check.manifest!.version, manifest: check.manifest! });
+      }
+    })();
+    return () => {
+      cancelled = true;
+      unsub?.();
+    };
   }, [existing]);
 
   const storedSecretMatches =

@@ -131,10 +131,14 @@ export async function downloadAndInstall(manifest: UpdateManifest, onProgress?: 
 
   // content:// URI through the app's FileProvider so the installer can read
   // the APK from our private directory.
-  const contentUri = `content://${Application.applicationId}.fileprovider/${file.name}`;
+  // androidx FileProvider resolves the FIRST path segment against the root's
+  // name attribute (files-path name="files"), so /files/<name> is required.
+  const contentUri = `content://${Application.applicationId}.fileprovider/files/${file.name}`;
   await IntentLauncher.startActivityAsync("android.intent.action.VIEW", {
     data: contentUri,
     type: "application/vnd.android.package-archive",
+    // FLAG_GRANT_READ_URI_PERMISSION — the installer needs it to open our URI.
+    flags: 1,
   });
   return file.uri;
 }
