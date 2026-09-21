@@ -53,6 +53,8 @@ import {
   subscribePendingUpdate,
   checkForUpdate,
   downloadAndInstall,
+  loadUpdateToken,
+  saveUpdateToken,
 } from "../lib/updater";
 import {
   PermissionCascadeMode,
@@ -195,6 +197,7 @@ export default function ProfileEditorScreen() {
   const [updateBusy, setUpdateBusy] = useState(false);
   const [updateError, setUpdateError] = useState<string | null>(null);
   const [updateProgress, setUpdateProgress] = useState(0);
+  const [updateToken, setUpdateTokenState] = useState("");
   const appVersion = Application.nativeApplicationVersion ?? "?";
 
   // Server-level notification default (only for existing profiles).
@@ -217,6 +220,7 @@ export default function ProfileEditorScreen() {
         ]);
         setServerNotif(serverNotifSetting);
         setAvatarShape(await loadAvatarShape());
+        setUpdateTokenState(await loadUpdateToken());
         const unsub = subscribePendingUpdate(setUpdate);
         const check = await checkForUpdate().catch(() => null);
         if (check?.updateAvailable) {
@@ -709,6 +713,21 @@ export default function ProfileEditorScreen() {
               Up to date (version {appVersion}). Checks happen automatically in the background.
             </Text>
           )}
+          <Text role="sub" ink={3} style={[styles.permHint, { marginTop: 16 }]}>
+            Release access token (only needed while the release host is sign-in-only). Stored on
+            this device only.
+          </Text>
+          <TextInput
+            value={updateToken}
+            onChangeText={setUpdateTokenState}
+            onEndEditing={() => void saveUpdateToken(updateToken.trim())}
+            placeholder="paste token if updates fail"
+            placeholderTextColor={colors.ink3}
+            autoCapitalize="none"
+            autoCorrect={false}
+            secureTextEntry
+            style={{ marginTop: 8, borderBottomWidth: 1, borderBottomColor: colors.surfaceEdge, paddingVertical: 6 }}
+          />
         </Sheet>
       ) : null}
     </Screen>
