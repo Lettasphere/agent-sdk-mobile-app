@@ -47,6 +47,8 @@ export type ReasoningEffort = SdkReasoningEffort | "max";
 export type ModelOption = Pick<LettaCodeModelEntry, "id" | "handle" | "label"> & {
   /** Catalog default/variant reasoning effort for this entry, if declared. */
   effort?: ReasoningEffort;
+  /** Effort tiers the catalog declares supported (reasoning_capabilities.supported_efforts). */
+  supportedEfforts?: ReasoningEffort[];
 };
 
 interface Connection {
@@ -490,12 +492,17 @@ export async function getConversationModel(
   const s = body.model_settings as {
     reasoning_effort?: string | null;
     effort?: string | null;
+    reasoning?: { reasoning_effort?: string | null } | null;
     thinking?: { type?: string } | null;
   } | null;
-  // Providers normalize effort differently: OpenAI keeps reasoning_effort/
-  // effort; Anthropic converts it into a thinking budget.
+  // Providers normalize effort differently: OpenAI/z.ai nest it as
+  // reasoning.reasoning_effort, Anthropic keeps top-level effort or converts
+  // it into a thinking budget.
   const effort =
-    s?.reasoning_effort ?? s?.effort ?? (s?.thinking?.type === "enabled" ? "thinking" : null);
+    s?.reasoning_effort ??
+    s?.reasoning?.reasoning_effort ??
+    s?.effort ??
+    (s?.thinking?.type === "enabled" ? "thinking" : null);
   return {
     model: body.model ?? null,
     reasoningEffort: effort,
@@ -535,6 +542,16 @@ type ModelSettings = NonNullable<UpdateConversationOptions["modelSettings"]>;
 function modelSettingsFor(model: string, effort?: ReasoningEffort): ModelSettings | undefined {
   if (!effort) return undefined;
   const provider = model.includes("/") ? model.split("/")[0] : undefined;
+  if (provider === "zai" || provider === "z-ai" || provider === "lc-zai-coding") {
+    // z.ai family (GLM): the API persists reasoning.reasoning_effort for
+    // provider_type "zai" — verified by round-trip PATCH Sept 21. The desktop
+    // client sends the same shape.
+    return {
+      provider_type: "zai",
+      parallel_tool_calls: true,
+      reasoning: { reasoning_effort: effort },
+    } as ModelSettings;
+  }
   if (provider === "anthropic") {
     const anthropicEfforts = ["low", "medium", "high", "xhigh", "max"] as const;
     type AnthropicEffort = (typeof anthropicEfforts)[number];
@@ -634,11 +651,21 @@ export async function listModels(conn: Connection): Promise<ModelOption[]> {
   const EFFORTS: readonly ReasoningEffort[] = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
   return result.entries.map((e) => {
     const raw = e.updateArgs?.reasoning_effort;
+    // z.ai-family models declare their tiers in reasoning_capabilities, not
+    // updateArgs (which stays null) — parse both.
+    const caps = (e as { reasoning_capabilities?: { supported_efforts?: unknown } | null })
+      .reasoning_capabilities;
+    const supported = Array.isArray(caps?.supported_efforts)
+      ? caps.supported_efforts.filter(
+          (x): x is ReasoningEffort => typeof x === "string" && (EFFORTS as readonly string[]).includes(x),
+        )
+      : undefined;
     return {
       id: e.id,
       handle: e.handle,
       label: e.label,
       effort: typeof raw === "string" && (EFFORTS as readonly string[]).includes(raw) ? (raw as ReasoningEffort) : undefined,
+      supportedEfforts: supported && supported.length > 0 ? supported : undefined,
     };
   });
 }

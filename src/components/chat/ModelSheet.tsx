@@ -27,13 +27,18 @@ const EFFORT_ORDER: readonly ReasoningEffort[] = ["none", "minimal", "low", "med
 
 /**
  * Effort tiers the app can actually send for this handle: OpenAI takes every
- * catalog tier, Anthropic has no none/minimal tier, and other providers have
- * no effort payload wired up (modelSettingsFor sends the model change alone).
+ * catalog tier, Anthropic has no none/minimal tier, z.ai (GLM: zai/, z-ai/,
+ * lc-zai-coding/ handles) sends reasoning.reasoning_effort with whatever
+ * tiers the catalog declares. Other providers have no effort payload wired
+ * up (modelSettingsFor sends the model change alone).
  */
 function sendableEfforts(handle: string, efforts: ReasoningEffort[]): ReasoningEffort[] {
   const provider = handle.includes("/") ? handle.split("/")[0] : undefined;
   if (provider === "openai") return EFFORT_ORDER.filter((e) => efforts.includes(e));
   if (provider === "anthropic") return EFFORT_ORDER.filter((e) => e !== "none" && e !== "minimal" && efforts.includes(e));
+  if (provider === "zai" || provider === "z-ai" || provider === "lc-zai-coding") {
+    return EFFORT_ORDER.filter((e) => efforts.includes(e));
+  }
   return [];
 }
 
@@ -70,10 +75,12 @@ export const ModelSheet = forwardRef<BottomSheetModal, Props>(function ModelShee
   const catalogEfforts = useMemo(() => {
     const map = new Map<string, Set<ReasoningEffort>>();
     for (const m of models) {
-      if (!m.effort) continue;
       let set = map.get(m.handle);
       if (!set) map.set(m.handle, (set = new Set()));
-      set.add(m.effort);
+      // Per-effort catalog variants (e.g. openai tiers ship as separate entries).
+      if (m.effort) set.add(m.effort);
+      // reasoning_capabilities.supported_efforts (z.ai/GLM family).
+      for (const e of m.supportedEfforts ?? []) set.add(e);
     }
     return map;
   }, [models]);
