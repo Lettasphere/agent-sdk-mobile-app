@@ -227,6 +227,7 @@ export default function ProfileEditorScreen() {
       setServerPermResolved(resolvePermission(PermissionCascadeMode.APP_DEFAULT, PermissionCascadeMode.AGENT_DEFAULT, serverPermSetting, appPermSetting));
       setAvatarShape(await loadAvatarShape());
       setUpdateTokenState(await loadUpdateToken());
+      if (cancelled) return;
       unsub = subscribePendingUpdate(setUpdate);
       const check = await checkForUpdate().catch(() => null);
       if (!cancelled && check?.updateAvailable) {

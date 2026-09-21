@@ -51,7 +51,7 @@ REST="${NEW_VERSION#*.}"
 VC_MINOR=$(( ${REST%%.*} * 100 ))
 VC_PATCH=$(( ${REST##*.} ))
 VERSION_CODE=$(( VC_MAJOR + VC_MINOR + VC_PATCH ))
-(( VC_MINOR < 100 && VC_PATCH < 100 )) || die "version scheme collides at minor/patch >= 100 (got $NEW_VERSION)"
+(( ${REST%%.*} < 100 && VC_PATCH < 100 )) || die "version scheme collides at minor/patch >= 100 (got $NEW_VERSION)"
 
 # --- write version everywhere (single edit, both files) --------------------
 python3 - "$NEW_VERSION" "$VERSION_CODE" <<'PY'
