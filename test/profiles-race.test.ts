@@ -1,3 +1,9 @@
+// ISOLATED TEST — runs in its own bun process (see package.json "test").
+// This file's mock.module("../auth/oauthTokens") is process-global and
+// irreversible in bun test: left inside src/, it silently replaces the real
+// oauthTokens module for every other test file in the same run (bun test
+// evaluates all files in one process). Moving it out + a second bun invocation
+// keeps the pollution contained to this file.
 import { expect, mock, test } from "bun:test";
 
 const asyncStorage = new Map<string, string>();
@@ -31,7 +37,7 @@ interface OAuthCredential {
   expiresAt: number;
 }
 
-mock.module("../auth/oauthTokens", () => ({
+mock.module("../src/lib/auth/oauthTokens", () => ({
   parseOAuthCredential: (value: string): OAuthCredential | null => {
     const parsed = JSON.parse(value) as OAuthCredential;
     return parsed.kind === "oauth" ? parsed : null;
@@ -47,7 +53,7 @@ mock.module("../auth/oauthTokens", () => ({
   },
 }));
 
-const { deleteProfile, getSecret } = await import("./profiles");
+const { deleteProfile, getSecret } = await import("../src/lib/profiles/profiles");
 
 test("profile deletion waits for refresh and revokes the rotated credential", async () => {
   const id = "profile-race";

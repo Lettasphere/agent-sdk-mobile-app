@@ -9,7 +9,7 @@
     "android": "expo run:android",
     "lint": "expo lint",
     "typecheck": "tsc --noEmit",
-    "test": "bun test src"
+    "test": "bun test src && bun test profiles-race"
   },
   "dependencies": {
     "@gorhom/bottom-sheet": "^5.2.6",
