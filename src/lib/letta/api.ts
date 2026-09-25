@@ -521,27 +521,35 @@ export async function getConversationModel(
 export async function updateConversationModel(
   conn: Connection,
   conversationId: string,
-  change: { model: string; reasoningEffort?: ReasoningEffort },
+  change: { model: string; reasoningEffort?: ReasoningEffort | null },
 ): Promise<void> {
-  const modelSettings = modelSettingsFor(change.model, change.reasoningEffort);
+  // Explicit-null effort is the "clear" signal: a model-only PATCH leaves the
+  // previous reasoning_effort (and provider_type) on the record — verified
+  // empirically Sept 24 — so switching to a model without effort tiers must
+  // send an explicit null or the stale tier survives reloads.
+  const effort = change.reasoningEffort ?? null;
+  const modelSettings = modelSettingsFor(change.model, effort);
   await sdkClient(conn).conversations.update(conversationId, {
     model: change.model,
     ...(modelSettings ? { modelSettings } : {}),
   });
 }
 
-/** The `model_settings` union the API accepts, keyed by provider. */
+/**
+ * The `model_settings` union the API accepts, keyed by provider.
+ */
 type ModelSettings = NonNullable<UpdateConversationOptions["modelSettings"]>;
 
 /**
  * Effort is spelled differently per provider — Anthropic takes a top-level
  * `effort` (and has no none/minimal tier, but does have `max`), while OpenAI
  * nests it as `reasoning.reasoning_effort`. The provider comes from the handle
- * prefix ("anthropic/claude-…"). Providers we don't model send the model change
- * alone rather than a guessed payload the server would reject.
+ * prefix ("anthropic/claude-…"). An explicit null effort clears the tier from
+ * the record (verified Sept 24: null sticks through later model-only PATCHes).
+ * Providers we don't model still get the null-reasoning clear so a previous
+ * provider's effort can't leak onto them.
  */
-function modelSettingsFor(model: string, effort?: ReasoningEffort): ModelSettings | undefined {
-  if (!effort) return undefined;
+function modelSettingsFor(model: string, effort: ReasoningEffort | null): ModelSettings | undefined {
   const provider = model.includes("/") ? model.split("/")[0] : undefined;
   if (provider === "zai" || provider === "z-ai" || provider === "lc-zai-coding") {
     // z.ai family (GLM): the API persists reasoning.reasoning_effort for
@@ -554,6 +562,7 @@ function modelSettingsFor(model: string, effort?: ReasoningEffort): ModelSetting
     } as ModelSettings;
   }
   if (provider === "anthropic") {
+    if (!effort) return { provider_type: "anthropic", effort: null } as unknown as ModelSettings;
     const anthropicEfforts = ["low", "medium", "high", "xhigh", "max"] as const;
     type AnthropicEffort = (typeof anthropicEfforts)[number];
     return anthropicEfforts.includes(effort as AnthropicEffort)
@@ -563,10 +572,19 @@ function modelSettingsFor(model: string, effort?: ReasoningEffort): ModelSetting
   if (provider === "openai") {
     // The typed SDK field omits "max" but the catalog ships OpenAI "max"
     // variants and the protocol accepts it — pass it through.
-    return { provider_type: "openai", reasoning: { reasoning_effort: effort as SdkReasoningEffort } };
+    return {
+      provider_type: "openai",
+      reasoning: { reasoning_effort: effort as SdkReasoningEffort },
+    } as ModelSettings;
   }
+  // Unmodeled provider: still clear any previous provider's effort so it can't
+  // leak (test Sept 24: zai effort "high" survived onto a google model when
+  // the PATCH carried model only). Minimal payload, no provider_type guess.
+  if (!effort) return { reasoning: { reasoning_effort: null } } as unknown as ModelSettings;
   return undefined;
 }
+
+export { modelSupportsEffort } from "./modelCapabilities";
 
 /**
  * Bulk-apply a model to many conversations (settings-sheet "downstream"

@@ -26,6 +26,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { ApprovalCard } from "../components/chat/ApprovalCard";
 import { ConnectionBanner } from "../components/chat/Banner";
 import { EnvironmentSheet } from "../components/chat/EnvironmentSheet";
+import { loadConversationEnv, saveConversationEnv, type ConversationEnv } from "../lib/conversationEnv";
 import { ModelSheet } from "../components/chat/ModelSheet";
 import { QueueCapsule } from "../components/chat/QueueCapsule";
 import { QueueSheet } from "../components/chat/QueueSheet";
@@ -75,6 +76,7 @@ import {
   isAuthError,
   listComputers,
   listModels,
+  modelSupportsEffort,
   updateConversationModel,
   type ComputerSummary,
   type ModelOption,
@@ -252,6 +254,7 @@ export default function ChatScreen() {
   // Permission cascade state: per-conversation setting + resolved mode.
   const [permSetting, setPermSetting] = useState<PermissionCascadeValue>(PermissionCascadeMode.AGENT_DEFAULT);
   const [permResolved, setPermResolved] = useState<PermissionCascadeValue>(PermissionCascadeMode.STANDARD);
+  const [permError, setPermError] = useState<string | null>(null);
   const attach = useCallback(async () => {
     haptic.tap();
     const picked = await pickImages();
@@ -499,6 +502,26 @@ export default function ChatScreen() {
     [params.conversationId, params.agentId, params.title, params.agentName, activeProfile],
   );
 
+  // Per-conversation environment (conversationEnv.ts): undefined inherits the
+  // profile's selector, null forces Cloud Sandbox, a selector pins a computer
+  // for THIS conversation only.
+  const [convEnv, setConvEnv] = useState<{ selector: ConversationEnv["selector"] }>({ selector: undefined });
+  // Bumped when the environment changes: restarts the session-lifecycle
+  // effect (which nulled sessionRef) so a fresh ChatSession with the new
+  // selector opens immediately — without this, send() silently no-ops until
+  // the screen is re-entered.
+  const [envNonce, setEnvNonce] = useState(0);
+  useEffect(() => {
+    if (!params.conversationId) return;
+    let cancelled = false;
+    void loadConversationEnv(params.conversationId).then((env) => {
+      if (!cancelled) setConvEnv({ selector: env.selector });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [params.conversationId]);
+
   // Session lifecycle — one ChatSession per open conversation.
   useEffect(() => {
     if (!activeProfile || !params.conversationId) return;
@@ -507,7 +530,13 @@ export default function ChatScreen() {
     void (async () => {
       try {
         const secret = (await getSecret(activeProfile.id)) ?? "";
-        const session = ChatSession.open({ profile: activeProfile, secret }, params.conversationId, params.agentId);
+        const env = await loadConversationEnv(params.conversationId);
+        const session = ChatSession.open(
+          { profile: activeProfile, secret },
+          params.conversationId,
+          params.agentId,
+          { selector: env.selector },
+        );
         if (cancelled) {
           session.close();
           return;
@@ -553,7 +582,8 @@ export default function ChatScreen() {
       opened?.close();
       sessionRef.current = null;
     };
-  }, [activeProfile, params.conversationId]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- envNonce intentionally restarts this effect
+  }, [activeProfile, params.conversationId, envNonce]);
 
   // Load the current conversation model once hydration settles — on remote,
   // concurrent control-channel connections collide (single-slot app-server).
@@ -579,7 +609,9 @@ export default function ChatScreen() {
           );
         }
         setModel(current.model);
-        setEffort(current.reasoningEffort);
+        // Gate the tier on provider capability: records written before the
+        // clear-on-switch fix can carry a stale effort from a previous model.
+        setEffort(modelSupportsEffort(current.model) ? current.reasoningEffort : null);
         if (current.title) setServerTitle(current.title);
       } catch {
         // Chip falls back to "model" affordance; sheet still works.
@@ -608,7 +640,9 @@ export default function ChatScreen() {
       modelSheetRef.current?.dismiss();
       const previous = { model, effort };
       setModel(handle);
-      if (nextEffort) setEffort(nextEffort);
+      // Clear-or-set: switching to a model without effort tiers must drop the
+      // stale tier, not carry the previous model's level on the chip.
+      setEffort(nextEffort ?? null);
       setModelSaving(true);
       try {
         if (activeProfile.type === "remote" && sessionRef.current) {
@@ -617,7 +651,9 @@ export default function ChatScreen() {
           const secret = (await getSecret(activeProfile.id)) ?? "";
           await updateConversationModel({ profile: activeProfile, secret }, params.conversationId, {
             model: handle,
-            ...(nextEffort ? { reasoningEffort: nextEffort } : {}),
+            // Explicit null clears the record's reasoning_effort (a model-only
+            // PATCH leaves the old tier behind — verified Sept 24).
+            reasoningEffort: nextEffort ?? null,
           });
         }
       } catch (e) {
@@ -650,49 +686,74 @@ export default function ChatScreen() {
     }
   }, [activeProfile, computers.length]);
 
-  const selectEnvironment = useCallback(
-    async (connectionId: string | null, name: string | null, deviceId?: string) => {
-      if (!activeProfile) return;
-      const secret = await getSecret(activeProfile.id);
-      // Store the DEVICE id (stable across remote restarts) — the session
-      // resolves it to the current connection lease at attach time. Storing
-      // the connectionId lease was the "selection breaks after restart" bug.
-      const updated: typeof activeProfile = {
-        ...activeProfile,
-        computerSelector:
-          deviceId && connectionId
-            ? { deviceId, connectionId, name: name ?? undefined }
-            : undefined,
-      };
-      await saveProfile(updated, secret);
-      // Refresh the in-memory profile context so the chip and session
-      // routing pick up the new computerSelector immediately.
-      await refreshProfiles();
-      // Force a new session on next send so the computer option takes effect.
-      if (sessionRef.current) {
-        sessionRef.current.close();
-        sessionRef.current = null;
-      }
-    },
-    [activeProfile, refreshProfiles],
-  );
-
-  // Display label for the environment chip — the name is stored in the
-  // profile's computerSelector alongside the connectionId.
-  const envChipLabel = activeProfile?.computerSelector
-    ? typeof activeProfile.computerSelector === "string"
-      ? activeProfile.computerSelector
-      : "name" in activeProfile.computerSelector && activeProfile.computerSelector.name
-        ? activeProfile.computerSelector.name
-        : "deviceId" in activeProfile.computerSelector
-          ? activeProfile.computerSelector.deviceId.slice(0, 8)
-          : "connectionId" in activeProfile.computerSelector
-            ? activeProfile.computerSelector.connectionId.slice(0, 8)
-            : "env"
-    : null;
-
   const running = snapshot.run === "running" || snapshot.run === "awaiting_approval";
   const aborting = snapshot.run === "aborting";
+
+  const selectEnvironment = useCallback(
+    async (connectionId: string | null, name: string | null, deviceId?: string, asDefault?: boolean) => {
+      if (!activeProfile || !params.conversationId) return;
+      // An env change restarts the session (envNonce) — a send in flight at
+      // that moment would be closed mid-run and its failure swallowed (the
+      // close clears the listeners the failure path commits to). Block the
+      // change while a run is active or stopping, mirroring the model-sheet
+      // error UX — and keep the sheet open so the message is visible.
+      if (running || aborting) {
+        setEnvError("Wait for the current run to finish before changing the environment.");
+        envSheetRef.current?.present();
+        return;
+      }
+      // Store the DEVICE id (stable across remote restarts) — the session
+      // resolves it to the current connection lease at attach time.
+      // PER-CONVERSATION: written to AsyncStorage keyed by this conversation,
+      // NOT to the profile — the old profile write rerouted every other
+      // conversation on the account.
+      const selector =
+        deviceId && connectionId
+          ? { deviceId, connectionId, name: name ?? undefined }
+          : null; // no deviceId = Cloud Sandbox choice
+      try {
+        await saveConversationEnv(params.conversationId, selector);
+        setConvEnv({ selector });
+        if (asDefault) {
+          // Keep the account-level default writable: this is what NEW
+          // conversations inherit when they have no override of their own.
+          // Cloud Sandbox (null) clears the profile default.
+          await saveProfile(
+            { ...activeProfile, computerSelector: selector ?? undefined },
+            null,
+          );
+          await refreshProfiles();
+        }
+        // Force a new session so the computer option takes effect on the very
+        // next send (the nonce restarts the lifecycle effect).
+        setEnvNonce((n) => n + 1);
+      } catch {
+        // The sheet has already dismissed — re-present it so the failure is
+        // visible instead of a silent no-op (mirrors selectModel's rollback).
+        setEnvError("Couldn't save the environment choice.");
+        envSheetRef.current?.present();
+      }
+    },
+    [activeProfile, params.conversationId, running, aborting, refreshProfiles],
+  );
+
+  // Effective selector for THIS conversation: conversation override first,
+  // then the profile default. Drives the chip label and the sheet's selected
+  // row.
+  const effectiveSelector: ConversationEnv["selector"] =
+    convEnv.selector === undefined ? activeProfile?.computerSelector : convEnv.selector;
+  const envChipLabel =
+    effectiveSelector == null
+      ? null
+      : typeof effectiveSelector === "string"
+        ? effectiveSelector
+        : "name" in effectiveSelector && effectiveSelector.name
+          ? effectiveSelector.name
+          : "deviceId" in effectiveSelector
+            ? effectiveSelector.deviceId.slice(0, 8)
+            : "connectionId" in effectiveSelector
+              ? effectiveSelector.connectionId.slice(0, 8)
+              : "env";
 
   // Send ↔ stop morph.
   const morph = useSharedValue(0);
@@ -1072,6 +1133,7 @@ export default function ChatScreen() {
         <Dropdown
           label="Permission mode"
           value={permSetting}
+          error={permError}
           options={
             (
               [
@@ -1092,6 +1154,7 @@ export default function ChatScreen() {
           }
           onSelect={(option) => {
             setPermSetting(option);
+            setPermError(null);
             console.log(`[PERM] UI user selected ${option} in conversation ${String(params.conversationId).slice(-8)}`);
             void sessionRef.current?.setCascadePermission(option).then(() => {
               void resolveEffectivePermission(
@@ -1099,6 +1162,12 @@ export default function ChatScreen() {
                 params.agentId,
                 activeProfile?.id,
               ).then((resolved) => setPermResolved(resolved));
+            }).catch((e) => {
+              // ensureSession can throw (e.g. this conversation's environment
+              // device is offline) — surface it, never leave the optimistic
+              // dropdown value silently lying about the server state.
+              setPermSetting(permSetting);
+              setPermError(e instanceof Error ? e.message : "Couldn't change permissions.");
             });
           }}
         />
@@ -1188,12 +1257,17 @@ export default function ChatScreen() {
           ref={envSheetRef}
           computers={computers}
           selectedConnectionId={
-            activeProfile?.computerSelector && typeof activeProfile.computerSelector === "object" && "connectionId" in activeProfile.computerSelector
-              ? activeProfile.computerSelector.connectionId
+            effectiveSelector && typeof effectiveSelector === "object" && "connectionId" in effectiveSelector
+              ? effectiveSelector.connectionId
               : null
           }
-          onSelect={(connectionId, name, deviceId) => {
-            void selectEnvironment(connectionId, name, deviceId);
+          selectedDeviceId={
+            effectiveSelector && typeof effectiveSelector === "object" && "deviceId" in effectiveSelector
+              ? effectiveSelector.deviceId
+              : null
+          }
+          onSelect={(connectionId, name, deviceId, asDefault) => {
+            void selectEnvironment(connectionId, name, deviceId, asDefault);
           }}
           loading={envLoading}
           error={envError}

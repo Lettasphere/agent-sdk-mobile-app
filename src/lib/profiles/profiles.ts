@@ -43,9 +43,11 @@ export interface Profile {
   /** Existing Cloud profiles omit this field and remain API-key profiles. */
   authMethod?: CloudAuthMethod;
   /**
-   * Cloud only: which computer/environment sessions execute on. When absent,
-   * the SDK provisions a managed sandbox. Stored per-profile because
-   * environments are tied to the cloud account, not individual conversations.
+   * Cloud only: the account-level DEFAULT environment — what new
+   * conversations inherit until they pick their own (per-conversation
+   * overrides live in conversationEnv.ts). When absent, the SDK provisions
+   * a managed sandbox. Written by the env sheet's "Use for new
+   * conversations" checkbox.
    */
   computerSelector?: ComputerSelectorField;
   /** Result of the last "Test connection" run. */

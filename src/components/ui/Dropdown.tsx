@@ -23,9 +23,12 @@ interface Props<T extends string> {
   value: T | null;
   options: DropdownOption<T>[];
   onSelect: (value: T) => void;
+  /** Inline error under the trigger (e.g. the server write failed and the
+   *  displayed value was rolled back). */
+  error?: string | null;
 }
 
-export function Dropdown<T extends string>({ label, value, options, onSelect }: Props<T>) {
+export function Dropdown<T extends string>({ label, value, options, onSelect, error }: Props<T>) {
   const { colors } = useTheme();
   const [open, setOpen] = useState(false);
   const selected = options.find((o) => o.value === value) ?? null;
@@ -55,6 +58,11 @@ export function Dropdown<T extends string>({ label, value, options, onSelect }: 
           </Text>
         </View>
       </Touchable>
+      {error ? (
+        <Text role="sub" tone="danger">
+          {error}
+        </Text>
+      ) : null}
       {open
         ? options.map((o) => (
             <Touchable

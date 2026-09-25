@@ -20,8 +20,8 @@ import type {
 import { createTranscriptAccumulator } from "@letta-ai/letta-agent-sdk/client";
 
 import { toImageContent, type Attachment } from "./attachments";
-import type { Profile } from "../profiles/profiles";
-import { getConversationModel, isAuthError, listComputers, listConversationMessages, listConversationRuns, sdkClient } from "./api";
+import type { ComputerSelectorField, Profile } from "../profiles/profiles";
+import { getConversationModel, isAuthError, listComputers, listConversationMessages, listConversationRuns, sdkClient, updateConversationModel } from "./api";
 import { ExternalTranscriptStore } from "./ExternalTranscriptStore";
 import { mergeTranscript } from "./echoMerge";
 import { emptyChat, type ApprovalRequest, type ChatSnapshot, type PermissionMode, type ToolStatus, type TranscriptItem } from "./model";
@@ -99,6 +99,7 @@ const LOCAL_RUN_SILENCE_MS = 15_000;
 
 export class ChatSession {
   private conn: { profile: Profile; secret: string };
+  private envOverride: { selector: ComputerSelectorField | null | undefined };
   private conversationId: string;
   private agentId: string;
   private session: LettaCodeSession | null = null;
@@ -233,6 +234,11 @@ export class ChatSession {
 
   private constructor(conn: { profile: Profile; secret: string }, conversationId: string, agentId: string) {
     this.conn = conn;
+    // Per-conversation environment override (see conversationEnv.ts):
+    // undefined = inherit profile.computerSelector; null = sandbox;
+    // selector = specific computer.
+    this.envOverride = { selector: undefined };
+    // (overwritten by ChatSession.open when a per-conversation env exists)
     this.conversationId = conversationId;
     this.agentId = agentId;
     this.snapshot = { ...emptyChat, hydrating: true };
@@ -244,8 +250,14 @@ export class ChatSession {
    * a cloud session provisions a sandbox, which is too heavy to pay for just
    * reading a conversation (see SDK-FEEDBACK.md #3).
    */
-  static open(conn: { profile: Profile; secret: string }, conversationId: string, agentId: string): ChatSession {
+  static open(
+    conn: { profile: Profile; secret: string },
+    conversationId: string,
+    agentId: string,
+    envOverride?: { selector: ComputerSelectorField | null | undefined },
+  ): ChatSession {
     const chat = new ChatSession(conn, conversationId, agentId);
+    if (envOverride) chat.envOverride = envOverride;
     void chat.hydrate();
     // Eagerly restore the saved permission mode into the snapshot so the chip
     // shows the right value even before the SDK session is created (lazy, on
@@ -279,14 +291,31 @@ export class ChatSession {
     // resolve it to the device's CURRENT connection lease at attach time.
     // Legacy profiles may still hold a raw connectionId lease (pre-deviceId
     // format); those pass through as-is.
-    const raw = this.conn.profile.computerSelector;
+    // Per-conversation override wins: undefined inherits the profile value,
+    // null forces the cloud sandbox, a selector routes to that computer.
+    const raw =
+      this.envOverride.selector === undefined
+        ? this.conn.profile.computerSelector
+        : this.envOverride.selector;
     let computer: { connectionId: string } | undefined;
-    if (raw && typeof raw === "object" && "deviceId" in raw) {
-      // Preferred: resolve the stable device id to its CURRENT lease; if the
-      // device is briefly offline, fall back to the stored lease.
+    if (!raw) {
+      computer = undefined;
+    } else if (typeof raw === "object" && "deviceId" in raw) {
+      // Preferred: resolve the stable device id to its CURRENT lease. The
+      // stored lease fallback is only valid for LEGACY selectors (written
+      // when this conversation's environment was chosen on this install);
+      // if both lookups miss, the device is offline — fail loudly rather
+      // than silently routing to the sandbox (tools would run in the wrong
+      // environment while the chip claims the device).
       const storedLease = "connectionId" in raw ? String(raw.connectionId) : undefined;
       const lease = (await this.resolveComputerLease(String(raw.deviceId))) ?? storedLease ?? null;
-      computer = lease ? { connectionId: lease } : undefined;
+      if (!lease) {
+        throw new Error(
+          `Environment offline: no live connection for device ${raw.deviceId.slice(0, 8)}. ` +
+            "Pick another environment for this conversation.",
+        );
+      }
+      computer = { connectionId: lease };
     } else if (raw && typeof raw === "object" && "connectionId" in raw) {
       computer = { connectionId: raw.connectionId };
     }
@@ -317,7 +346,10 @@ export class ChatSession {
    * but the user hasn't sent anything from this device yet.
    */
   warmup(): void {
-    void this.ensureSession();
+    // ensureSession can throw (e.g. the selected environment's device is
+    // offline) — swallow here: the error surfaces with a failed-bubble +
+    // error row when the user actually sends, which is the right moment.
+    void this.ensureSession().catch(() => {});
     void this.session?.getDeviceStatus().catch(() => {
       // Connection state already surfaces through the session's own paths.
     });
@@ -608,10 +640,18 @@ export class ChatSession {
 
   /** Change the conversation model/effort through the session (first-class SDK API). */
   async setModel(model: string, reasoningEffort?: string): Promise<void> {
-    await (await this.ensureSession()).updateModel({
-      modelHandle: model,
-      ...(reasoningEffort ? { reasoningEffort: reasoningEffort as never } : {}),
-    });
+    if (reasoningEffort) {
+      await (await this.ensureSession()).updateModel({
+        modelHandle: model,
+        reasoningEffort: reasoningEffort as never,
+      });
+      return;
+    }
+    // No effort tier: the session protocol's updateModel payload can't carry a
+    // null effort ({model_id?, model_handle?} only), so a model-only update
+    // would leave the previous tier on the record. Clear it through the same
+    // REST path getModelInfo uses (verified Sept 24: explicit null sticks).
+    await updateConversationModel(this.conn, this.conversationId, { model, reasoningEffort: null });
   }
 
   /** Change the runtime permission mode (SDK 0.3.0 #208 write, 0.3.1 #212 read). */

@@ -19,21 +19,25 @@ interface Props {
   computers: ComputerSummary[];
   /** Currently selected connectionId, or null for cloud sandbox. */
   selectedConnectionId: string | null;
-  onSelect: (connectionId: string | null, name: string | null, deviceId?: string) => void;
+  /** Currently selected device id — leases rotate on restarts, so row
+   *  selection must compare by the stable device id when one is known. */
+  selectedDeviceId?: string | null;
+  onSelect: (connectionId: string | null, name: string | null, deviceId?: string, asDefault?: boolean) => void;
   loading?: boolean;
   error?: string | null;
 }
 
 export const EnvironmentSheet = forwardRef<BottomSheetModal, Props>(function EnvironmentSheet(
-  { computers, selectedConnectionId, onSelect, loading, error },
+  { computers, selectedConnectionId, selectedDeviceId, onSelect, loading, error },
   ref,
 ) {
   const { colors } = useTheme();
   const [dismissing, setDismissing] = useState(false);
+  const [asDefault, setAsDefault] = useState(false);
 
   const handleSelect = (connectionId: string | null, name: string | null, deviceId?: string) => {
     setDismissing(true);
-    onSelect(connectionId, name, deviceId);
+    onSelect(connectionId, name, deviceId, asDefault || undefined);
     (ref as React.RefObject<BottomSheetModal>)?.current?.dismiss();
     setDismissing(false);
   };
@@ -50,7 +54,17 @@ export const EnvironmentSheet = forwardRef<BottomSheetModal, Props>(function Env
   });
 
   return (
-    <Sheet ref={ref} title="Environment">
+    <Sheet
+      ref={ref}
+      title="Environment"
+      onSheetDismiss={() => {
+        // Reset the default toggle every time the sheet closes — a sticky
+        // checked box would silently rewrite the account-level default on
+        // every later pick.
+        setAsDefault(false);
+        setDismissing(false);
+      }}
+    >
       {loading ? (
         <Text role="sub" ink={3}>
           Loading environments…
@@ -60,6 +74,29 @@ export const EnvironmentSheet = forwardRef<BottomSheetModal, Props>(function Env
           {error}
         </Text>
       ) : null}
+
+      {/* Account-level default toggle: applies the picked environment to NEW
+          conversations (existing ones keep their own choice). */}
+      <Touchable
+        accessibilityRole="checkbox"
+        accessibilityState={{ checked: asDefault }}
+        accessibilityLabel="Use selection as default for new conversations"
+        onPress={() => setAsDefault((v) => !v)}
+        style={styles.defaultRow}
+      >
+        <View style={styles.checkboxWrap}>
+          <View style={[styles.checkbox, asDefault && { borderColor: colors.accent }]}>
+            {asDefault ? (
+              <Text role="bodyEm" tone="accent">
+                ✓
+              </Text>
+            ) : null}
+          </View>
+        </View>
+        <Text role="sub" ink={2} style={styles.defaultLabel}>
+          Use for new conversations
+        </Text>
+      </Touchable>
 
       {/* Cloud Sandbox (SDK default) */}
       <View style={styles.section}>
@@ -93,7 +130,11 @@ export const EnvironmentSheet = forwardRef<BottomSheetModal, Props>(function Env
             ONLINE
           </Text>
           {onlineComputers.map((c) => {
-            const selected = selectedConnectionId === c.connectionId;
+            // Compare by stable device id — connection leases rotate on every
+            // device restart, so a stored lease matches no row after a restart.
+            const selected = selectedDeviceId
+              ? selectedDeviceId === c.deviceId
+              : selectedConnectionId === c.connectionId;
             return (
               <Touchable
                 key={c.connectionId}
@@ -136,10 +177,22 @@ export const EnvironmentSheet = forwardRef<BottomSheetModal, Props>(function Env
 
 const styles = StyleSheet.create({
   section: { gap: 2 },
-  sectionLabel: { paddingTop: space.sm, paddingBottom: space.xs, textTransform: "uppercase" },
+  sectionLabel: { paddingTop: space.xs, paddingBottom: space.xs, textTransform: "uppercase" },
   row: { minHeight: 46 },
   rowInner: { flexDirection: "row", alignItems: "center", gap: space.sm, paddingVertical: 6 },
   rowText: { flex: 1, gap: 1 },
   statusWrap: { flexDirection: "row", alignItems: "center", gap: space.sm },
   statusDot: { width: 8, height: 8, borderRadius: 4 },
+  defaultRow: { flexDirection: "row", alignItems: "center", gap: space.sm, paddingVertical: space.sm },
+  checkboxWrap: { paddingVertical: 2 },
+  checkbox: {
+    width: 18,
+    height: 18,
+    borderRadius: 4,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: "#888",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  defaultLabel: { flex: 1 },
 });
