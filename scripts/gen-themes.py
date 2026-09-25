@@ -185,6 +185,26 @@ def main():
         "rose-pine": "Rosé Pine", "rose-pine-dawn": "Rosé Pine Dawn",
         "rose-pine-moon": "Rosé Pine Moon", "solarized-dark": "Solarized Dark",
         "solarized-light": "Solarized Light",
+        # Wolff (Hadoku/@wolffm) themes: display prefix follows the library's
+        # ColorTheme.allWithNames (theming v0.14.1) — "Wolff", not the slug's "wolffm".
+        "wolffm-coffee-dark": "Wolff Coffee Dark",
+        "wolffm-coffee-light": "Wolff Coffee Light",
+        "wolffm-cyberpunk-dark": "Wolff Cyberpunk Dark",
+        "wolffm-cyberpunk-light": "Wolff Cyberpunk Light",
+        "wolffm-izakaya-dark": "Wolff Izakaya Dark",
+        "wolffm-izakaya-light": "Wolff Izakaya Light",
+        "wolffm-lavender-dark": "Wolff Lavender Dark",
+        "wolffm-lavender-light": "Wolff Lavender Light",
+        "wolffm-nature-dark": "Wolff Nature Dark",
+        "wolffm-nature-light": "Wolff Nature Light",
+        "wolffm-ocean-dark": "Wolff Ocean Dark",
+        "wolffm-ocean-light": "Wolff Ocean Light",
+        "wolffm-pink-dark": "Wolff Pink Dark",
+        "wolffm-pink-light": "Wolff Pink Light",
+        "wolffm-strawberry-dark": "Wolff Strawberry Dark",
+        "wolffm-strawberry-light": "Wolff Strawberry Light",
+        "wolffm-wolf-base-dark": "Wolff Base Dark",
+        "wolffm-wolf-base-light": "Wolff Base Light",
     }
     for tid in sorted(catalog):
         lines.append(f'  "{tid}": "{pretty.get(tid, tid.replace("-", " ").title())}",')
