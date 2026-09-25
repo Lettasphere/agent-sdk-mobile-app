@@ -67,7 +67,16 @@ sed -i 's/gradle-9\.[0-9.]*-bin/gradle-8.14.3-bin/' android/gradle/wrapper/gradl
 
 This is temporary — once Expo/RN plugins support Gradle 9, the default wrapper will work and this step can be removed.
 
+**SDK location (one-time):** `android/local.properties` is gitignored — create it after cloning, or gradle fails with an empty SDK error:
+
+```bash
+echo "sdk.dir=/home/rhomancer/android-sdk" > android/local.properties
+```
+
+(Verified path on the build host, Sep 25 2026 — the v0.3.7 release built against it. Adjust if the SDK moves.)
+
 **Build command:**
+
 ```bash
 cd android && ANDROID_HOME=$HOME/Android/Sdk JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64 \
   ./gradlew app:assembleDebug -x lint -x test --build-cache -PreactNativeArchitectures=arm64-v8a
