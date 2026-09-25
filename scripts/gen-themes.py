@@ -11,7 +11,7 @@ Regenerate after adding themes to the library:
 import json
 import os
 
-LIB = os.path.expanduser("~/dev/angus/angus-software-theming/tokens")
+LIB = os.environ.get("THEMING_LIB_TOKENS", os.path.expanduser("~/dev/angus/angus-software-theming/tokens"))
 OUT = os.path.join(os.path.dirname(__file__), "..", "src", "theme", "catalog.ts")
 
 
