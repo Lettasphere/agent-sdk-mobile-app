@@ -690,17 +690,21 @@ export default function ChatScreen() {
   const aborting = snapshot.run === "aborting";
 
   const selectEnvironment = useCallback(
-    async (connectionId: string | null, name: string | null, deviceId?: string, asDefault?: boolean) => {
-      if (!activeProfile || !params.conversationId) return;
+    async (
+      connectionId: string | null,
+      name: string | null,
+      deviceId?: string,
+      asDefault?: boolean,
+    ): Promise<boolean> => {
+      if (!activeProfile || !params.conversationId) return false;
       // An env change restarts the session (envNonce) — a send in flight at
       // that moment would be closed mid-run and its failure swallowed (the
       // close clears the listeners the failure path commits to). Block the
-      // change while a run is active or stopping, mirroring the model-sheet
-      // error UX — and keep the sheet open so the message is visible.
+      // change while a run is active or stopping; the sheet stays open and
+      // shows this message (it defers its dismiss until we resolve).
       if (running || aborting) {
         setEnvError("Wait for the current run to finish before changing the environment.");
-        envSheetRef.current?.present();
-        return;
+        return false;
       }
       // Store the DEVICE id (stable across remote restarts) — the session
       // resolves it to the current connection lease at attach time.
@@ -713,26 +717,36 @@ export default function ChatScreen() {
           : null; // no deviceId = Cloud Sandbox choice
       try {
         await saveConversationEnv(params.conversationId, selector);
-        setConvEnv({ selector });
-        if (asDefault) {
-          // Keep the account-level default writable: this is what NEW
-          // conversations inherit when they have no override of their own.
-          // Cloud Sandbox (null) clears the profile default.
+      } catch {
+        // The conversation choice itself failed — nothing applied, keep the
+        // sheet open with the error visible (it defers its dismiss until we
+        // resolve).
+        setEnvError("Couldn't save the environment choice.");
+        return false;
+      }
+      // The conversation choice is durable from here — apply it optimistically
+      // and restart the session so routing matches the chip no matter what
+      // happens to the (optional) account-default write below.
+      setConvEnv({ selector });
+      setEnvNonce((n) => n + 1);
+      if (asDefault) {
+        // Keep the account-level default writable: this is what NEW
+        // conversations inherit when they have no override of their own.
+        // Cloud Sandbox (null) clears the profile default. Failure here
+        // leaves the conversation pick intact (it saved) — surface it
+        // without rolling the chip back into a lying state.
+        try {
           await saveProfile(
             { ...activeProfile, computerSelector: selector ?? undefined },
             null,
           );
           await refreshProfiles();
+        } catch {
+          setEnvError("Saved for this conversation, but couldn't update the default for new ones.");
+          return false;
         }
-        // Force a new session so the computer option takes effect on the very
-        // next send (the nonce restarts the lifecycle effect).
-        setEnvNonce((n) => n + 1);
-      } catch {
-        // The sheet has already dismissed — re-present it so the failure is
-        // visible instead of a silent no-op (mirrors selectModel's rollback).
-        setEnvError("Couldn't save the environment choice.");
-        envSheetRef.current?.present();
       }
+      return true;
     },
     [activeProfile, params.conversationId, running, aborting, refreshProfiles],
   );
@@ -1157,7 +1171,7 @@ export default function ChatScreen() {
             setPermError(null);
             console.log(`[PERM] UI user selected ${option} in conversation ${String(params.conversationId).slice(-8)}`);
             void sessionRef.current?.setCascadePermission(option).then(() => {
-              void resolveEffectivePermission(
+              return resolveEffectivePermission(
                 params.conversationId,
                 params.agentId,
                 activeProfile?.id,
@@ -1266,9 +1280,9 @@ export default function ChatScreen() {
               ? effectiveSelector.deviceId
               : null
           }
-          onSelect={(connectionId, name, deviceId, asDefault) => {
-            void selectEnvironment(connectionId, name, deviceId, asDefault);
-          }}
+          onSelect={(connectionId, name, deviceId, asDefault) =>
+            selectEnvironment(connectionId, name, deviceId, asDefault)
+          }
           loading={envLoading}
           error={envError}
         />

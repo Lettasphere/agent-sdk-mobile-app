@@ -269,15 +269,19 @@ export class ChatSession {
 
   /**
    * Resolve a stored device id to its current online connection lease.
-   * Returns null when the device is offline or unknown — the session then
-   * falls back to the managed sandbox rather than failing to route.
+   * Tri-state: a lease when the device is online, null when the listing
+   * succeeded and the device is genuinely absent (offline), and "unknown"
+   * when the listing itself failed (network blip) — callers must not report
+   * "offline" on a failed lookup, nor silently route on a stale lease.
    */
-  private async resolveComputerLease(deviceId: string): Promise<string | null> {
+  private async resolveComputerLease(
+    deviceId: string,
+  ): Promise<{ lease: string | null; known: boolean }> {
     try {
       const computers = await listComputers({ profile: this.conn.profile, secret: this.conn.secret });
-      return computers.find((c) => c.deviceId === deviceId)?.connectionId ?? null;
+      return { lease: computers.find((c) => c.deviceId === deviceId)?.connectionId ?? null, known: true };
     } catch {
-      return null;
+      return { lease: null, known: false };
     }
   }
 
@@ -301,21 +305,31 @@ export class ChatSession {
     if (!raw) {
       computer = undefined;
     } else if (typeof raw === "object" && "deviceId" in raw) {
-      // Preferred: resolve the stable device id to its CURRENT lease. The
-      // stored lease fallback is only valid for LEGACY selectors (written
-      // when this conversation's environment was chosen on this install);
-      // if both lookups miss, the device is offline — fail loudly rather
-      // than silently routing to the sandbox (tools would run in the wrong
-      // environment while the chip claims the device).
+      // Preferred: resolve the stable device id to its CURRENT lease.
+      // - Listing succeeded + lease found → route to it.
+      // - Listing succeeded + no lease → device genuinely offline. The
+      //   stored lease is stale by definition (the listing is authoritative
+      //   and doesn't have it) — fail loudly rather than silently routing
+      //   to the sandbox (tools would run in the wrong environment while
+      //   the chip claims the device).
+      // - Listing failed (network blip) → fall back to the stored lease;
+      //   if none, fail with a transient-lookup message, not "offline".
       const storedLease = "connectionId" in raw ? String(raw.connectionId) : undefined;
-      const lease = (await this.resolveComputerLease(String(raw.deviceId))) ?? storedLease ?? null;
-      if (!lease) {
+      const { lease, known } = await this.resolveComputerLease(String(raw.deviceId));
+      if (known && !lease) {
         throw new Error(
           `Environment offline: no live connection for device ${raw.deviceId.slice(0, 8)}. ` +
             "Pick another environment for this conversation.",
         );
       }
-      computer = { connectionId: lease };
+      const resolved = lease ?? storedLease ?? null;
+      if (!resolved) {
+        throw new Error(
+          `Couldn't reach the environment list to find device ${raw.deviceId.slice(0, 8)}. ` +
+            "Check your connection, or pick another environment.",
+        );
+      }
+      computer = { connectionId: resolved };
     } else if (raw && typeof raw === "object" && "connectionId" in raw) {
       computer = { connectionId: raw.connectionId };
     }
@@ -347,9 +361,15 @@ export class ChatSession {
    */
   warmup(): void {
     // ensureSession can throw (e.g. the selected environment's device is
-    // offline) — swallow here: the error surfaces with a failed-bubble +
-    // error row when the user actually sends, which is the right moment.
-    void this.ensureSession().catch(() => {});
+    // offline) — swallow the rejection but record it in the snapshot so the
+    // header doesn't claim "Connected" while every send is about to fail.
+    // The full error surfaces with a failed-bubble + error row when the
+    // user actually sends, which is the right moment.
+    void this.ensureSession().catch(() => {
+      // No error field on the snapshot — the offline phase is the visible
+      // hint; the full message surfaces on the first send attempt.
+      this.commit(patch(this.snapshot, { connection: "offline", hydrating: false }));
+    });
     void this.session?.getDeviceStatus().catch(() => {
       // Connection state already surfaces through the session's own paths.
     });

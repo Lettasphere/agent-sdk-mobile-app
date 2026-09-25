@@ -22,7 +22,12 @@ interface Props {
   /** Currently selected device id — leases rotate on restarts, so row
    *  selection must compare by the stable device id when one is known. */
   selectedDeviceId?: string | null;
-  onSelect: (connectionId: string | null, name: string | null, deviceId?: string, asDefault?: boolean) => void;
+  onSelect: (
+    connectionId: string | null,
+    name: string | null,
+    deviceId?: string,
+    asDefault?: boolean,
+  ) => boolean | Promise<boolean>;
   loading?: boolean;
   error?: string | null;
 }
@@ -35,11 +40,16 @@ export const EnvironmentSheet = forwardRef<BottomSheetModal, Props>(function Env
   const [dismissing, setDismissing] = useState(false);
   const [asDefault, setAsDefault] = useState(false);
 
-  const handleSelect = (connectionId: string | null, name: string | null, deviceId?: string) => {
+  const handleSelect = async (connectionId: string | null, name: string | null, deviceId?: string) => {
     setDismissing(true);
-    onSelect(connectionId, name, deviceId, asDefault || undefined);
-    (ref as React.RefObject<BottomSheetModal>)?.current?.dismiss();
+    // The caller reports whether the pick applied. Deferring the dismiss
+    // until it resolves keeps the sheet open on block/save failure so the
+    // error is actually visible — presenting into an in-flight dismissal
+    // is a no-op in @gorhom/bottom-sheet, so re-present can't recover.
+    const applied = await onSelect(connectionId, name, deviceId, asDefault || undefined);
     setDismissing(false);
+    if (applied === false) return;
+    (ref as React.RefObject<BottomSheetModal>)?.current?.dismiss();
   };
 
   // Deduplicate by deviceId — the environments API returns multiple stale
@@ -103,7 +113,7 @@ export const EnvironmentSheet = forwardRef<BottomSheetModal, Props>(function Env
         <Touchable
           accessibilityRole="button"
           accessibilityLabel={`Cloud Sandbox${selectedConnectionId === null ? ", selected" : ""}`}
-          onPress={() => handleSelect(null, null)}
+          onPress={() => void handleSelect(null, null)}
           disabled={dismissing}
           style={styles.row}
         >
@@ -140,7 +150,7 @@ export const EnvironmentSheet = forwardRef<BottomSheetModal, Props>(function Env
                 key={c.connectionId}
                 accessibilityRole="button"
                 accessibilityLabel={`${c.name}${selected ? ", selected" : ""}`}
-                onPress={() => handleSelect(c.connectionId, c.name, c.deviceId)}
+                onPress={() => void handleSelect(c.connectionId, c.name, c.deviceId)}
                 disabled={dismissing}
                 style={styles.row}
               >
