@@ -6,6 +6,12 @@ export interface NativeConversationSpec {
   title: string;
   /** Agent display name — the MessagingStyle Person (contact) name. */
   agentName?: string;
+  /**
+   * One-shot watch for MOBILE_ONLY conversations with a local run in
+   * flight: notify the turn-boundary completion, then retire the spec.
+   * (Regular specs poll until re-registered.)
+   */
+  onlyLocalRun?: boolean;
 }
 
 export interface NativePollOptions {

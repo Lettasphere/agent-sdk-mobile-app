@@ -51,7 +51,7 @@ import { Touchable } from "../components/ui/Touchable";
 import { haptic } from "../lib/haptics";
 import { ChatSession } from "../lib/letta/ChatSession";
 import { clearConversationNotifications, setVisibleConversation } from "../../modules/background-poll";
-import { isNativelyWatched } from "../lib/backgroundPolling";
+import { isNativelyWatched, registerLocalRunWatch } from "../lib/backgroundPolling";
 
 import {
   NotificationMode,
@@ -465,11 +465,11 @@ export default function ChatScreen() {
       if (mode === NotificationMode.OFF) return;
       // MOBILE_ONLY: only notify for runs started from this app.
       if (mode === NotificationMode.MOBILE_ONLY && isExternal) return;
-      // ALL_MESSAGES: notify for all runs — EXCEPT when the native poller
-      // owns this conversation's notifications (it posts the rich one;
-      // before this guard both systems fired and every completion was a
-      // double notification: generic JS text + rich native card).
-      if (mode === NotificationMode.ALL_MESSAGES && isNativelyWatched(conversationId)) return;
+      // The native poller owns delivery for anything it watches — regular
+      // ALL_MESSAGES specs AND one-shot MOBILE_ONLY specs (runs started here,
+      // app backgrounded mid-turn). Before this guard both systems fired and
+      // every completion was a double notification.
+      if (isNativelyWatched(conversationId)) return;
       await postConversationNotification(
         conversationId,
         title,
@@ -553,6 +553,15 @@ export default function ChatScreen() {
         // to decide whether to post a system notification.
         session.isScreenVisible = true;
         const convTitle = params.title ?? params.agentName ?? "Conversation";
+        // MOBILE_ONLY delivery while backgrounded: register this session so
+        // the native poller can take over the in-flight local run when JS
+        // pauses (one-shot spec — retires after the turn completes).
+        registerLocalRunWatch(params.conversationId, {
+          agentId: params.agentId ?? "",
+          title: convTitle,
+          agentName: params.agentName ?? undefined,
+          hasLocalRun: () => session.hasLocalRunInFlight(),
+        });
         session.onTurnCompleted = (success: boolean) => {
           // Local run completed — fires for MOBILE_ONLY and ALL_MESSAGES.
           void handleRunCompletion(params.conversationId, convTitle, success, false);
@@ -579,6 +588,7 @@ export default function ChatScreen() {
     })();
     return () => {
       cancelled = true;
+      registerLocalRunWatch(params.conversationId, null);
       opened?.close();
       sessionRef.current = null;
     };

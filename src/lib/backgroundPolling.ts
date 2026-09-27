@@ -33,6 +33,30 @@ let startInFlight = false;
 const nativelyWatched = new Set<string>();
 
 /**
+ * Live chat sessions, registered by the chat screen. MOBILE_ONLY
+ * notifications fire only for runs started from this app — and when the
+ * app backgrounds, JS pauses, so the native poller must take over delivery.
+ * It can't see client identity, so this registry tells enumeration which
+ * conversations have a locally-started run still in flight.
+ */
+interface LocalRunWatch {
+  agentId: string;
+  title: string;
+  agentName?: string;
+  hasLocalRun: () => boolean;
+}
+const localRuns = new Map<string, LocalRunWatch>();
+
+/** Register/unregister a live chat session for MOBILE_ONLY background delivery. */
+export function registerLocalRunWatch(
+  conversationId: string,
+  watch: LocalRunWatch | null,
+): void {
+  if (watch) localRuns.set(conversationId, watch);
+  else localRuns.delete(conversationId);
+}
+
+/**
  * Enumerate ALL_MESSAGES conversations for the profile and start the native
  * poller. No-op (with log) if none qualify or the profile/token is missing.
  */
@@ -82,9 +106,25 @@ export async function startBackgroundPollingForProfile(profile: Profile | null):
       return;
     }
 
+    // MOBILE_ONLY: register live conversations whose current run was started
+    // from this app — the native poller takes over delivery while JS is
+    // paused (one-shot specs: they retire after the turn's completion).
+    for (const [convId, watch] of localRuns) {
+      if (!watch.hasLocalRun()) continue;
+      if (specs.some((s) => s.conversationId === convId)) continue; // ALL_MESSAGES already covers it
+      specs.push({
+        conversationId: convId,
+        agentId: watch.agentId,
+        title: watch.title,
+        agentName: watch.agentName,
+        onlyLocalRun: true,
+      });
+      console.log(`[BG-POLL] MOBILE_ONLY one-shot registered conv=${convId.slice(-8)}`);
+    }
+
     nativelyWatched.clear();
     if (specs.length === 0) {
-      console.log("[BG-POLL] no ALL_MESSAGES conversations — not starting");
+      console.log("[BG-POLL] no ALL_MESSAGES conversations and no local MOBILE_ONLY runs — not starting");
       return;
     }
     for (const spec of specs) nativelyWatched.add(spec.conversationId);

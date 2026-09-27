@@ -167,6 +167,16 @@ export class ChatSession {
   // --- Notification hooks (adapted from KMP client ChatScreen.kt) ---
   /** True when the chat screen is visible — notifications fire only when off-screen. */
   isScreenVisible = false;
+
+  /**
+   * True while a turn started FROM THIS APP is still executing. Read by the
+   * background-polling registry: MOBILE_ONLY notifications must fire for
+   * exactly these turns, and the native poller can only see server state —
+   * this flag tells it which conversations have a local run in flight.
+   */
+  hasLocalRunInFlight(): boolean {
+    return this.localRunInFlight;
+  }
   /** Fired when a run started from THIS app completes (success or failure). */
   onTurnCompleted: ((success: boolean) => void) | null = null;
   /** Fired when a run started from ANOTHER client completes. */

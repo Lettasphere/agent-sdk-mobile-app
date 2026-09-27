@@ -28,6 +28,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.TimeZone
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
@@ -43,7 +44,14 @@ import java.util.concurrent.TimeUnit
  */
 class BackgroundPollService : Service() {
 
-  private data class ConversationSpec(val conversationId: String, val agentId: String, val title: String, val agentName: String = "Agent")
+  private data class ConversationSpec(
+    val conversationId: String,
+    val agentId: String,
+    val title: String,
+    val agentName: String = "Agent",
+    /** One-shot: notify the next turn-boundary completion, then retire. */
+    val onlyLocalRun: Boolean = false,
+  )
 
   private var scheduler: ScheduledExecutorService? = null
   private val notifiedRunIds: MutableSet<String> = HashSet()
@@ -53,7 +61,7 @@ class BackgroundPollService : Service() {
   private val pendingContent = mutableMapOf<String, Long>()
   private var conversations: List<ConversationSpec> = emptyList()
   /** conversationId → spec, for O(1) sweep filtering. */
-  private val watched = HashMap<String, ConversationSpec>()
+  private val watched = ConcurrentHashMap<String, ConversationSpec>()
   /** agentId → profile-picture bitmap, fetched once per service lifetime. */
   private val avatarCache = HashMap<String, Bitmap>()
   /** agentId → messaging Person (avatar + name), built once per service lifetime. */
@@ -119,7 +127,13 @@ class BackgroundPollService : Service() {
         val o = arr.optJSONObject(i) ?: return@mapNotNull null
         val cid = o.optString("conversationId")
         if (cid.isEmpty()) null
-        else ConversationSpec(cid, o.optString("agentId"), o.optString("title").ifEmpty { "Conversation" }, o.optString("agentName").ifEmpty { "Agent" })
+        else ConversationSpec(
+          cid,
+          o.optString("agentId"),
+          o.optString("title").ifEmpty { "Conversation" },
+          o.optString("agentName").ifEmpty { "Agent" },
+          o.optBoolean("onlyLocalRun", false),
+        )
       }
     } catch (e: Exception) {
       Log.e(TAG, "bad conversations JSON: ${e.message}")
@@ -161,9 +175,11 @@ class BackgroundPollService : Service() {
         if (completedAt != null && completedAt < pollStartedAt - 5_000L) continue
         // The user is viewing this conversation — the turn already played out
         // live in front of them. CONSUME the run so it doesn't fire when they
-        // leave the screen (the "queued notification" bug).
+        // leave the screen (the "queued notification" bug). One-shot specs
+        // retire too: the turn they were armed for has ended.
         if (convId == visibleConversationId) {
           synchronized(notifiedRunIds) { notifiedRunIds.add(id) }
+          if (spec.onlyLocalRun) watched.remove(convId)
           continue
         }
         // The turn completed while the user was on that screen (they left
@@ -172,6 +188,7 @@ class BackgroundPollService : Service() {
         val visUntil = visibleUntil[convId]
         if (completedAt != null && visUntil != null && completedAt <= visUntil + 5_000L) {
           synchronized(notifiedRunIds) { notifiedRunIds.add(id) }
+          if (spec.onlyLocalRun) watched.remove(convId)
           continue
         }
         val isNew: Boolean
@@ -197,6 +214,13 @@ class BackgroundPollService : Service() {
         Log.i(TAG, "turn ended (run ${id.takeLast(8)}, $status/$stopReason) conv=${convId.takeLast(8)} — posting notification")
         postCompletionNotification(spec, content ?: fallback)
         notifications++
+        // One-shot watch (MOBILE_ONLY with a local run in flight): the turn
+        // this spec was registered for just ended — retire it so the poller
+        // stops watching this conversation.
+        if (spec.onlyLocalRun) {
+          watched.remove(convId)
+          Log.i(TAG, "one-shot spec retired conv=${convId.takeLast(8)}")
+        }
         if (notifications >= 3) break // don't storm on catch-up sweeps
       }
     } catch (e: Exception) {
