@@ -100,9 +100,14 @@ class BackgroundPollService : Service() {
         ShortcutManagerCompat.removeAllDynamicShortcuts(this)
       } catch (_: Exception) {}
     }
-    // Seed dedup with run IDs the JS stream already notified.
-    notifiedRunIds.clear()
-    notifiedRunIds.addAll(intent.getStringArrayListExtra("notifiedRunIds") ?: ArrayList())
+    // Seed dedup with run IDs the JS stream already notified. Synchronized:
+    // the poll thread reads/writes this set under the same lock — an
+    // unsynchronized clear/addAll here can corrupt dedup (duplicate
+    // notifications) when a re-start lands between poll sweeps.
+    synchronized(notifiedRunIds) {
+      notifiedRunIds.clear()
+      notifiedRunIds.addAll(intent.getStringArrayListExtra("notifiedRunIds") ?: ArrayList())
+    }
 
     if (conversations.isEmpty() || token.isEmpty()) {
       Log.e(TAG, "no conversations or token — stopping")
@@ -706,6 +711,19 @@ class BackgroundPollService : Service() {
         svc.watched.remove(conversationId)
         Log.i(TAG, "one-shot disarmed conv=${conversationId.takeLast(8)}")
       }
+    }
+
+    /**
+     * True when the live service still holds an armed one-shot spec for this
+     * conversation (false when retired, disarmed, or service not running).
+     * The JS carry-over consults this so a spec that already fired (native
+     * retirement) is NOT re-pushed on re-enumeration — re-pushing a retired
+     * spec would make a MOBILE_ONLY conversation notify on any EXTERNAL run
+     * (the poller can't distinguish client identity).
+     */
+    fun isOneShotArmed(conversationId: String): Boolean {
+      val svc = instance ?: return false
+      return svc.watched[conversationId]?.onlyLocalRun == true
     }
 
     /** How long a completed run may wait for lagging reply text before the generic fallback posts. */

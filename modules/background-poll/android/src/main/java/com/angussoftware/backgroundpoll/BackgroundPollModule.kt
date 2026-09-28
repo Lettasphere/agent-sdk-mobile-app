@@ -52,6 +52,13 @@ class BackgroundPollModule : Module() {
       null
     }
 
+    // True when the live poller still holds an armed one-shot for this
+    // conversation — the JS carry-over consults it to avoid re-pushing
+    // specs that already fired (retired natively).
+    AsyncFunction("isOneShotArmed") { conversationId: String ->
+      BackgroundPollService.isOneShotArmed(conversationId)
+    }
+
     // Clear any posted notifications for a conversation the user just opened
     // (they're about to see everything live — the card is stale).
     AsyncFunction("clearConversationNotifications") { conversationId: String ->

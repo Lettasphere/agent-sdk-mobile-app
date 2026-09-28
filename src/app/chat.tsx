@@ -51,7 +51,7 @@ import { Touchable } from "../components/ui/Touchable";
 import { haptic } from "../lib/haptics";
 import { ChatSession } from "../lib/letta/ChatSession";
 import { clearConversationNotifications, setVisibleConversation } from "../../modules/background-poll";
-import { isNativelyWatched, registerLocalRunWatch, armMobileOnlyOneShot, disarmMobileOnlyOneShot } from "../lib/backgroundPolling";
+import { isNativelyWatched, registerLocalRunWatch, armMobileOnlyOneShot, disarmMobileOnlyOneShot, retireMobileOnlyOneShotRecord } from "../lib/backgroundPolling";
 
 import {
   NotificationMode,
@@ -567,6 +567,11 @@ export default function ChatScreen() {
           hasLocalRun: () => session.hasLocalRunInFlight(),
         });
         session.onTurnCompleted = (success: boolean) => {
+          // Local run completed — the armed one-shot record has served its
+          // purpose (the poller fired or consumed the turn). Drop it so a
+          // later re-enumeration can't carry a dead spec forward (which
+          // would notify on external runs — the MOBILE_ONLY violation).
+          retireMobileOnlyOneShotRecord(params.conversationId);
           // Local run completed — fires for MOBILE_ONLY and ALL_MESSAGES.
           void handleRunCompletion(params.conversationId, convTitle, success, false);
         };
@@ -578,13 +583,20 @@ export default function ChatScreen() {
         // already covers it) and would downgrade spec semantics.
         session.onLocalRunStarted = () => {
           void (async () => {
-            const mode = await resolveEffectiveMode(params.conversationId, params.agentId, activeProfile?.id);
-            if (mode !== NotificationMode.MOBILE_ONLY) return;
-            await armMobileOnlyOneShot(
-              params.conversationId,
-              { agentId: params.agentId ?? "", title: convTitle, agentName: params.agentName ?? undefined },
-              activeProfile ? { profile: activeProfile, secret: (await getSecret(activeProfile.id)) ?? "" } : null,
-            );
+            try {
+              const mode = await resolveEffectiveMode(params.conversationId, params.agentId, activeProfile?.id);
+              if (mode !== NotificationMode.MOBILE_ONLY) return;
+              await armMobileOnlyOneShot(
+                params.conversationId,
+                { agentId: params.agentId ?? "", title: convTitle, agentName: params.agentName ?? undefined },
+                activeProfile ? { profile: activeProfile, secret: (await getSecret(activeProfile.id)) ?? "" } : null,
+              );
+            } catch (e) {
+              // Teardown races this IIFE (screen unmounted mid-resolve) —
+              // never an unhandled rejection; the native arm simply didn't
+              // land and the poller won't watch this turn.
+              console.log(`[BG-POLL] send-time arm failed conv=${params.conversationId.slice(-8)}: ${e instanceof Error ? e.message : String(e)}`);
+            }
           })();
         };
         session.onExternalRunCompleted = (success: boolean) => {

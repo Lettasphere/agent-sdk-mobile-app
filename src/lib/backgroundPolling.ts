@@ -13,7 +13,7 @@
  * contexts (main context pauses timers on host pause; headless contexts
  * don't drive them on the bridgeless runtime) — see Lesson #716.
  */
-import { startPolling as nativeStartPolling, stopPolling as nativeStopPolling, armOneShot as nativeArmOneShot, disarmOneShot as nativeDisarmOneShot, type NativeConversationSpec } from "../../modules/background-poll";
+import { startPolling as nativeStartPolling, stopPolling as nativeStopPolling, armOneShot as nativeArmOneShot, disarmOneShot as nativeDisarmOneShot, isOneShotArmed as nativeIsOneShotArmed, type NativeConversationSpec } from "../../modules/background-poll";
 import { listAgents, listConversations } from "./letta/api";
 import { NotificationMode, resolveEffectiveMode, loadAvatarShape } from "./notifications";
 import type { Profile } from "./profiles/profiles";
@@ -124,9 +124,26 @@ export async function startBackgroundPollingForProfile(profile: Profile | null):
 
     // Send-time-armed one-shots (chat screen armed at send, then unmounted —
     // the leave-screen gap): carry them across the re-enumeration so the
-    // watched-map rebuild doesn't drop them.
+    // watched-map rebuild doesn't drop them. STALENESS GUARD: only carry a
+    // spec the native poller still holds armed — retirement (turn already
+    // completed) removes it from the native watched map, and re-pushing a
+    // retired spec would make a MOBILE_ONLY conversation notify on any
+    // EXTERNAL run (the poller can't distinguish client identity). Belt:
+    // a mounted session whose local run already ended is skipped too.
     for (const [convId, spec] of armedOneShots) {
       if (specs.some((s) => s.conversationId === convId)) continue; // ALL_MESSAGES or localRuns already covers it
+      const liveWatch = localRuns.get(convId);
+      if (liveWatch && !liveWatch.hasLocalRun()) {
+        // Session still mounted, local run finished — the JS onTurnCompleted
+        // retire raced the enumeration. Drop the record, don't re-push.
+        armedOneShots.delete(convId);
+        continue;
+      }
+      const stillArmedNatively = await nativeIsOneShotArmed(convId);
+      if (!stillArmedNatively) {
+        armedOneShots.delete(convId);
+        continue;
+      }
       specs.push(spec);
       console.log(`[BG-POLL] carry-over one-shot conv=${convId.slice(-8)}`);
     }
@@ -221,9 +238,14 @@ export async function armMobileOnlyOneShot(
     console.log("[BG-POLL] one-shot arm aborted — no connection");
     return;
   }
+  if (startInFlight) {
+    // An enumeration-driven start is mid-flight: it carries this spec via
+    // the armedOneShots carry-over — starting a second polling instance
+    // here would replace the full spec list with just this one.
+    console.log(`[BG-POLL] one-shot arm deferred to in-flight enumeration conv=${conversationId.slice(-8)}`);
+    return;
+  }
   const avatarShape = await loadAvatarShape();
-  nativelyWatched.add(conversationId);
-  pollerRunning = true;
   await nativeStartPolling({
     conversations: [spec],
     baseUrl:
@@ -235,6 +257,10 @@ export async function armMobileOnlyOneShot(
     notifiedRunIds: [],
     avatarShape,
   });
+  // Set only after the native start resolves — a throw leaves the flag
+  // honest (a retry arm will re-attempt the cold start).
+  pollerRunning = true;
+  nativelyWatched.add(conversationId);
   console.log(`[BG-POLL] one-shot armed at send (cold start) conv=${conversationId.slice(-8)}`);
 }
 
@@ -243,4 +269,17 @@ export async function disarmMobileOnlyOneShot(conversationId: string): Promise<v
   armedOneShots.delete(conversationId);
   nativelyWatched.delete(conversationId);
   await nativeDisarmOneShot(conversationId);
+}
+
+/**
+ * Retire the armed-record after the local turn completed on the JS side
+ * (session still mounted — onTurnCompleted fired). Native-side retirement
+ * already happened (the poller fired or consumed the turn); this drops the
+ * JS record so a later re-enumeration doesn't carry a dead spec forward.
+ * nativelyWatched is NOT touched: for the window between completion and
+ * retirement the double-notification guard must keep suppressing the JS
+ * path, and enumeration rebuilds it anyway.
+ */
+export function retireMobileOnlyOneShotRecord(conversationId: string): void {
+  armedOneShots.delete(conversationId);
 }

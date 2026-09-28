@@ -44,6 +44,7 @@ declare class BackgroundPollNativeModule {
   stopPolling(): Promise<void>;
   armOneShot(specJson: string): Promise<boolean>;
   disarmOneShot(conversationId: string): Promise<void>;
+  isOneShotArmed(conversationId: string): Promise<boolean>;
   setVisibleConversation(conversationId: string | null): Promise<void>;
   clearConversationNotifications(conversationId: string): Promise<void>;
 }
@@ -80,6 +81,11 @@ export function armOneShot(spec: NativeConversationSpec): Promise<boolean> {
 /** Disarm a one-shot watch (send failed — nothing to wait for). */
 export function disarmOneShot(conversationId: string): Promise<void> {
   return native.disarmOneShot(conversationId);
+}
+
+/** True when the live poller still holds an armed one-shot for this conversation. */
+export function isOneShotArmed(conversationId: string): Promise<boolean> {
+  return native.isOneShotArmed(conversationId);
 }
 
 /** Suppress notifications for the conversation currently on screen. */
