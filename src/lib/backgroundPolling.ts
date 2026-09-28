@@ -24,6 +24,15 @@ const MAX_AGENTS = 10;
 
 let startInFlight = false;
 /**
+ * Serializes every nativeStartPolling call (enumeration starts AND arm
+ * fell-through cold starts). onStartCommand rebuilds the watched map from
+ * the intent's spec list, so two concurrent starts interleave as
+ * replace-not-merge: the loser's specs vanish. The chain serializes them;
+ * arm cold starts re-check pollerRunning inside their link and arm live
+ * when a predecessor already started the service.
+ */
+let coldStartChain: Promise<void> = Promise.resolve();
+/**
  * Resolvers waiting for the in-flight enumeration-driven start to drain.
  * Send-time arms that hit the startInFlight defer branch wait on these,
  * then re-check liveness and arm live (or cold if the enumeration failed).
@@ -161,19 +170,26 @@ export async function startBackgroundPollingForProfile(profile: Profile | null):
     }
     for (const spec of specs) nativelyWatched.add(spec.conversationId);
     console.log(`[BG-POLL] starting for ${specs.length} conversation(s): ${specs.map((s) => s.conversationId.slice(-8)).join(",")}`);
-    await nativeStartPolling({
-      conversations: specs,
-      baseUrl:
-        profile.type === "remote" && profile.url
-          ? // Remote profiles store a ws(s):// URL — REST needs http(s)://.
-            profile.url.replace(/^ws:/i, "http:").replace(/^wss:/i, "https:")
-          : "https://api.letta.com",
-      token: secret,
-      pollStartedAt,
-      notifiedRunIds: [],
-      avatarShape,
-    });
-    pollerRunning = true;
+    // Join the cold-start chain: an enumeration start must serialize against
+    // arm fell-through cold starts (same interleave class — one side's
+    // nativeStartPolling replacing the other's watched map mid-flight).
+    const runEnumerationStart = async (): Promise<void> => {
+      await nativeStartPolling({
+        conversations: specs,
+        baseUrl:
+          profile.type === "remote" && profile.url
+            ? // Remote profiles store a ws(s):// URL — REST needs http(s)://.
+              profile.url.replace(/^ws:/i, "http:").replace(/^wss:/i, "https:")
+            : "https://api.letta.com",
+        token: secret,
+        pollStartedAt,
+        notifiedRunIds: [],
+        avatarShape,
+      });
+      pollerRunning = true;
+    };
+    coldStartChain = coldStartChain.then(runEnumerationStart, runEnumerationStart);
+    await coldStartChain;
   } finally {
     startInFlight = false;
     // Wake any send-time arms that deferred to this enumeration — they
@@ -192,16 +208,6 @@ export async function startBackgroundPollingForProfile(profile: Profile | null):
  * setVisibleConversation), so nothing stops it and the flag never resets.
  */
 let pollerRunning = false;
-
-/**
- * Serializes fell-through cold starts (defer-branch arms that drained
- * without a live poller). Without this, two waiters can interleave:
- * A suspends inside nativeStartPolling([specA]) before setting
- * pollerRunning; B's liveness check still reads false and issues its own
- * replacing start — the service's onStartCommand rebuilds the watched map
- * from the intent, dropping specA.
- */
-let coldStartChain: Promise<void> = Promise.resolve();
 
 /**
  * Send-time-armed one-shot specs, keyed by conversation. Tracked so a
@@ -270,6 +276,16 @@ export async function armMobileOnlyOneShot(
     await new Promise<void>((resolve) => {
       startDrainWaiters.push(resolve);
     });
+    // Retired-while-parked discriminator (same signal the enumeration's
+    // staleness belt uses): if the session that armed this is still mounted
+    // and its local run has ENDED, the turn already completed — onTurnCompleted
+    // retired the record, and re-asserting would resurrect a dead spec. A
+    // post-drain cold start captures pollStartedAt NOW, so the ended turn is
+    // invisible to sweeps: the spec would linger and notify on the next
+    // EXTERNAL run (MOBILE_ONLY violation). Unmounted sessions have no
+    // localRuns entry — their arms proceed (the leave-screen case).
+    const liveWatch = localRuns.get(conversationId);
+    if (liveWatch && !liveWatch.hasLocalRun()) return; // retired during park
     // Re-assert the record: the enumeration's carry-over consulted
     // isOneShotArmed against a service that wasn't running yet and may
     // have deleted it as "stale". Without this, the next AppState
