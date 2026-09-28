@@ -13,7 +13,7 @@
  * contexts (main context pauses timers on host pause; headless contexts
  * don't drive them on the bridgeless runtime) — see Lesson #716.
  */
-import { startPolling as nativeStartPolling, stopPolling as nativeStopPolling, armOneShot as nativeArmOneShot, disarmOneShot as nativeDisarmOneShot, isOneShotArmed as nativeIsOneShotArmed, type NativeConversationSpec } from "../../modules/background-poll";
+import { startPolling as nativeStartPolling, armOneShot as nativeArmOneShot, disarmOneShot as nativeDisarmOneShot, isOneShotArmed as nativeIsOneShotArmed, type NativeConversationSpec } from "../../modules/background-poll";
 import { listAgents, listConversations } from "./letta/api";
 import { NotificationMode, resolveEffectiveMode, loadAvatarShape } from "./notifications";
 import type { Profile } from "./profiles/profiles";
@@ -185,14 +185,23 @@ export async function startBackgroundPollingForProfile(profile: Profile | null):
   }
 }
 
-/** Stop the native poller (app returned to foreground). */
-export async function stopBackgroundPolling(): Promise<void> {
-  await nativeStopPolling();
-  pollerRunning = false;
-}
-
-/** True once startPolling has succeeded this app session (poller is live). */
+/**
+ * True once startPolling has succeeded this app session (poller is live).
+ * Monotonic by design: the poller runs for the app's whole lifetime
+ * (foregrounded too — per-conversation suppression is handled by
+ * setVisibleConversation), so nothing stops it and the flag never resets.
+ */
 let pollerRunning = false;
+
+/**
+ * Serializes fell-through cold starts (defer-branch arms that drained
+ * without a live poller). Without this, two waiters can interleave:
+ * A suspends inside nativeStartPolling([specA]) before setting
+ * pollerRunning; B's liveness check still reads false and issues its own
+ * replacing start — the service's onStartCommand rebuilds the watched map
+ * from the intent, dropping specA.
+ */
+let coldStartChain: Promise<void> = Promise.resolve();
 
 /**
  * Send-time-armed one-shot specs, keyed by conversation. Tracked so a
@@ -261,6 +270,13 @@ export async function armMobileOnlyOneShot(
     await new Promise<void>((resolve) => {
       startDrainWaiters.push(resolve);
     });
+    // Re-assert the record: the enumeration's carry-over consulted
+    // isOneShotArmed against a service that wasn't running yet and may
+    // have deleted it as "stale". Without this, the next AppState
+    // re-enumeration rebuilds without this spec — onStartCommand's
+    // watched.clear() drops the live one-shot (leave-screen gap, one
+    // AppState later).
+    armedOneShots.set(conversationId, spec);
     if (pollerRunning) {
       const armed = await nativeArmOneShot(spec);
       if (armed) {
@@ -270,26 +286,43 @@ export async function armMobileOnlyOneShot(
       }
     }
     // Enumeration drained without a live poller — fall through to cold
-    // start (armedOneShots still holds this spec for future carry-overs).
+    // start (armedOneShots holds this spec for future carry-overs).
     console.log(`[BG-POLL] one-shot arm fell through post-drain to cold start conv=${conversationId.slice(-8)}`);
   }
   const avatarShape = await loadAvatarShape();
-  await nativeStartPolling({
-    conversations: [spec],
-    baseUrl:
-      conn.profile.type === "remote" && conn.profile.url
-        ? conn.profile.url.replace(/^ws:/i, "http:").replace(/^wss:/i, "https:")
-        : "https://api.letta.com",
-    token: conn.secret,
-    pollStartedAt: Date.now(),
-    notifiedRunIds: [],
-    avatarShape,
-  });
-  // Set only after the native start resolves — a throw leaves the flag
-  // honest (a retry arm will re-attempt the cold start).
-  pollerRunning = true;
-  nativelyWatched.add(conversationId);
-  console.log(`[BG-POLL] one-shot armed at send (cold start) conv=${conversationId.slice(-8)}`);
+  // Serialize fell-through cold starts: two deferred arms draining without
+  // a live poller must not interleave (A's nativeStartPolling([specA])
+  // suspended before pollerRunning=true → B starts [specB] → the service
+  // rebuild replaces A's watch). The chain serializes them; the liveness
+  // re-check inside makes the loser arm live instead of re-starting.
+  const runColdStart = async (): Promise<void> => {
+    if (pollerRunning) {
+      const armed = await nativeArmOneShot(spec);
+      if (armed) {
+        nativelyWatched.add(conversationId);
+        console.log(`[BG-POLL] one-shot armed via cold-start chain (live re-check) conv=${conversationId.slice(-8)}`);
+        return;
+      }
+    }
+    await nativeStartPolling({
+      conversations: [spec],
+      baseUrl:
+        conn.profile.type === "remote" && conn.profile.url
+          ? conn.profile.url.replace(/^ws:/i, "http:").replace(/^wss:/i, "https:")
+          : "https://api.letta.com",
+      token: conn.secret,
+      pollStartedAt: Date.now(),
+      notifiedRunIds: [],
+      avatarShape,
+    });
+    // Set only after the native start resolves — a throw leaves the flag
+    // honest (a retry arm will re-attempt the cold start).
+    pollerRunning = true;
+    nativelyWatched.add(conversationId);
+    console.log(`[BG-POLL] one-shot armed at send (cold start) conv=${conversationId.slice(-8)}`);
+  };
+  coldStartChain = coldStartChain.then(runColdStart, runColdStart);
+  await coldStartChain;
 }
 
 /** Disarm a send-time one-shot (send failed — nothing to wait for). */
