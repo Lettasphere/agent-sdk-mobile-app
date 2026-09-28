@@ -73,6 +73,11 @@ class BackgroundPollService : Service() {
 
   override fun onBind(intent: Intent?): IBinder? = null
 
+  override fun onCreate() {
+    super.onCreate()
+    instance = this
+  }
+
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
     if (intent == null) {
       stopSelf()
@@ -125,19 +130,34 @@ class BackgroundPollService : Service() {
       val arr = JSONArray(json)
       (0 until arr.length()).mapNotNull { i ->
         val o = arr.optJSONObject(i) ?: return@mapNotNull null
-        val cid = o.optString("conversationId")
-        if (cid.isEmpty()) null
-        else ConversationSpec(
-          cid,
-          o.optString("agentId"),
-          o.optString("title").ifEmpty { "Conversation" },
-          o.optString("agentName").ifEmpty { "Agent" },
-          o.optBoolean("onlyLocalRun", false),
-        )
+        parseSpecObject(o)
       }
     } catch (e: Exception) {
       Log.e(TAG, "bad conversations JSON: ${e.message}")
       emptyList()
+    }
+  }
+
+  /** Parse a single spec object (shared by array parsing and armOneShot). */
+  private fun parseSpecObject(o: JSONObject): ConversationSpec? {
+    val cid = o.optString("conversationId")
+    if (cid.isEmpty()) return null
+    return ConversationSpec(
+      cid,
+      o.optString("agentId"),
+      o.optString("title").ifEmpty { "Conversation" },
+      o.optString("agentName").ifEmpty { "Agent" },
+      o.optBoolean("onlyLocalRun", false),
+    )
+  }
+
+  /** Parse a single spec from its JSON encoding (one object, not an array). */
+  private fun parseOneSpec(json: String): ConversationSpec? {
+    return try {
+      parseSpecObject(JSONObject(json))
+    } catch (e: Exception) {
+      Log.e(TAG, "bad spec JSON: ${e.message}")
+      null
     }
   }
 
@@ -644,11 +664,50 @@ class BackgroundPollService : Service() {
     scheduler?.shutdownNow()
     scheduler = null
     Log.i(TAG, "polling stopped")
+    instance = null
     super.onDestroy()
   }
 
   companion object {
     const val TAG = "BG-POLL"
+    /** Live service instance — enables incremental arm/disarm without a full restart. */
+    @Volatile
+    private var instance: BackgroundPollService? = null
+
+    /**
+     * Incrementally arm a one-shot watch on the LIVE service instance (no
+     * restart, no re-enumeration). Called by the module when a local run
+     * starts in a MOBILE_ONLY conversation — the send-time arm is what
+     * covers the "user leaves the conversation screen while the app stays
+     * foreground" gap: the chat session tears down on unmount, so JS-side
+     * delivery dies, and no AppState change fires to trigger enumeration.
+     * Returns false when the service isn't running (caller falls back to a
+     * full start via startPolling).
+     */
+    fun armOneShot(specJson: String): Boolean {
+      val svc = instance ?: return false
+      val spec = svc.parseOneSpec(specJson) ?: return false
+      // Don't clobber a regular (ALL_MESSAGES) watch with a one-shot.
+      val existing = svc.watched[spec.conversationId]
+      if (existing != null && !existing.onlyLocalRun) {
+        Log.i(TAG, "arm conv=${spec.conversationId.takeLast(8)} skipped — regular watch active")
+        return true
+      }
+      svc.watched[spec.conversationId] = spec
+      Log.i(TAG, "one-shot armed at send time conv=${spec.conversationId.takeLast(8)}")
+      return true
+    }
+
+    /** Disarm a one-shot spec (send failed — nothing to watch for). */
+    fun disarmOneShot(conversationId: String) {
+      val svc = instance ?: return
+      val existing = svc.watched[conversationId]
+      if (existing?.onlyLocalRun == true) {
+        svc.watched.remove(conversationId)
+        Log.i(TAG, "one-shot disarmed conv=${conversationId.takeLast(8)}")
+      }
+    }
+
     /** How long a completed run may wait for lagging reply text before the generic fallback posts. */
     const val CONTENT_WAIT_MS = 30_000L
     /** The conversation currently on screen — notifications for it are suppressed. */

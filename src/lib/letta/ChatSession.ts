@@ -179,6 +179,14 @@ export class ChatSession {
   }
   /** Fired when a run started from THIS app completes (success or failure). */
   onTurnCompleted: ((success: boolean) => void) | null = null;
+  /**
+   * Fired the moment a local send dispatches (before any await). Delivery
+   * ownership for MOBILE_ONLY notifications must be handed to the native
+   * poller AT SEND TIME — the chat screen may unmount (user leaves the
+   * conversation) while the run is still in flight, and with it dies every
+   * JS-side callback that would have posted the notification.
+   */
+  onLocalRunStarted: (() => void) | null = null;
   /** Fired when a run started from ANOTHER client completes. */
   onExternalRunCompleted: ((success: boolean) => void) | null = null;
   /** True while an externally-initiated run is streaming into this session.
@@ -435,6 +443,7 @@ export class ChatSession {
     if (this.snapshot.run === "idle") this.commit(patch(this.snapshot, { run: "running" }));
     this.localRunInFlight = true;
     this.lastLocalStreamAt = Date.now();
+    if (this.onLocalRunStarted) this.onLocalRunStarted();
     console.log(`[SEND] ${this.permLogTag} ${this.conversationId.slice(-8)} SDK-DISPATCH otid=${otid.slice(-8)} t=${Date.now()}`);
     try {
       // The SDK takes either a string or a multimodal content array; images

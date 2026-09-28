@@ -42,6 +42,8 @@ declare class BackgroundPollNativeModule {
     avatarShape?: string;
   }): Promise<void>;
   stopPolling(): Promise<void>;
+  armOneShot(specJson: string): Promise<boolean>;
+  disarmOneShot(conversationId: string): Promise<void>;
   setVisibleConversation(conversationId: string | null): Promise<void>;
   clearConversationNotifications(conversationId: string): Promise<void>;
 }
@@ -64,6 +66,20 @@ export function startPolling(options: NativePollOptions): Promise<void> {
 /** Stop native polling. */
 export function stopPolling(): Promise<void> {
   return native.stopPolling();
+}
+
+/**
+ * Incrementally arm a one-shot MOBILE_ONLY watch on the live poller
+ * (send-time arm). Returns false when the poller isn't running — the
+ * caller must fall back to a full startPolling with this spec included.
+ */
+export function armOneShot(spec: NativeConversationSpec): Promise<boolean> {
+  return native.armOneShot(JSON.stringify(spec));
+}
+
+/** Disarm a one-shot watch (send failed — nothing to wait for). */
+export function disarmOneShot(conversationId: string): Promise<void> {
+  return native.disarmOneShot(conversationId);
 }
 
 /** Suppress notifications for the conversation currently on screen. */

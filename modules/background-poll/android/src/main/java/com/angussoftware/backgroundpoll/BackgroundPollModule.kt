@@ -39,6 +39,19 @@ class BackgroundPollModule : Module() {
       BackgroundPollService.reportVisibleConversation(conversationId)
     }
 
+    // Incrementally arm/disarm a one-shot MOBILE_ONLY watch on the live
+    // poller (send-time arm — covers leaving the conversation screen while
+    // the app stays foreground). Returns false when the poller isn't
+    // running; the JS caller then falls back to a full start.
+    AsyncFunction("armOneShot") { specJson: String ->
+      BackgroundPollService.armOneShot(specJson)
+    }
+
+    AsyncFunction("disarmOneShot") { conversationId: String ->
+      BackgroundPollService.disarmOneShot(conversationId)
+      null
+    }
+
     // Clear any posted notifications for a conversation the user just opened
     // (they're about to see everything live — the card is stale).
     AsyncFunction("clearConversationNotifications") { conversationId: String ->

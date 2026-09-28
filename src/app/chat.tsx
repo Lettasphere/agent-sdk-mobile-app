@@ -51,7 +51,7 @@ import { Touchable } from "../components/ui/Touchable";
 import { haptic } from "../lib/haptics";
 import { ChatSession } from "../lib/letta/ChatSession";
 import { clearConversationNotifications, setVisibleConversation } from "../../modules/background-poll";
-import { isNativelyWatched, registerLocalRunWatch } from "../lib/backgroundPolling";
+import { isNativelyWatched, registerLocalRunWatch, armMobileOnlyOneShot, disarmMobileOnlyOneShot } from "../lib/backgroundPolling";
 
 import {
   NotificationMode,
@@ -485,6 +485,10 @@ export default function ChatScreen() {
   // same notification pipeline when notifications are on for this conversation.
   const handleSendFailed = useCallback(
     async (reason: string) => {
+      // The one-shot armed at send time is now pointless — the run never
+      // started server-side. Retire it so the poller isn't watching a
+      // conversation for a turn that will never end.
+      void disarmMobileOnlyOneShot(params.conversationId);
       const session = sessionRef.current;
       if (!session) return;
       // Don't notify if the screen is visible — the failed bubble is right there.
@@ -565,6 +569,23 @@ export default function ChatScreen() {
         session.onTurnCompleted = (success: boolean) => {
           // Local run completed — fires for MOBILE_ONLY and ALL_MESSAGES.
           void handleRunCompletion(params.conversationId, convTitle, success, false);
+        };
+        // Send-time arm: the moment a local run starts, hand delivery to the
+        // native poller (MOBILE_ONLY only). If the user leaves this screen
+        // while the run is in flight, every JS callback here dies with the
+        // unmount — the native one-shot is the only survivor. Arming an
+        // ALL_MESSAGES conversation is unnecessary (its regular watch
+        // already covers it) and would downgrade spec semantics.
+        session.onLocalRunStarted = () => {
+          void (async () => {
+            const mode = await resolveEffectiveMode(params.conversationId, params.agentId, activeProfile?.id);
+            if (mode !== NotificationMode.MOBILE_ONLY) return;
+            await armMobileOnlyOneShot(
+              params.conversationId,
+              { agentId: params.agentId ?? "", title: convTitle, agentName: params.agentName ?? undefined },
+              activeProfile ? { profile: activeProfile, secret: (await getSecret(activeProfile.id)) ?? "" } : null,
+            );
+          })();
         };
         session.onExternalRunCompleted = (success: boolean) => {
           // External run completed — fires only for ALL_MESSAGES.

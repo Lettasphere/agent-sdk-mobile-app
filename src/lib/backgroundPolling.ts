@@ -13,7 +13,7 @@
  * contexts (main context pauses timers on host pause; headless contexts
  * don't drive them on the bridgeless runtime) — see Lesson #716.
  */
-import { startPolling as nativeStartPolling, stopPolling as nativeStopPolling, type NativeConversationSpec } from "../../modules/background-poll";
+import { startPolling as nativeStartPolling, stopPolling as nativeStopPolling, armOneShot as nativeArmOneShot, disarmOneShot as nativeDisarmOneShot, type NativeConversationSpec } from "../../modules/background-poll";
 import { listAgents, listConversations } from "./letta/api";
 import { NotificationMode, resolveEffectiveMode, loadAvatarShape } from "./notifications";
 import type { Profile } from "./profiles/profiles";
@@ -122,6 +122,15 @@ export async function startBackgroundPollingForProfile(profile: Profile | null):
       console.log(`[BG-POLL] MOBILE_ONLY one-shot registered conv=${convId.slice(-8)}`);
     }
 
+    // Send-time-armed one-shots (chat screen armed at send, then unmounted —
+    // the leave-screen gap): carry them across the re-enumeration so the
+    // watched-map rebuild doesn't drop them.
+    for (const [convId, spec] of armedOneShots) {
+      if (specs.some((s) => s.conversationId === convId)) continue; // ALL_MESSAGES or localRuns already covers it
+      specs.push(spec);
+      console.log(`[BG-POLL] carry-over one-shot conv=${convId.slice(-8)}`);
+    }
+
     nativelyWatched.clear();
     if (specs.length === 0) {
       console.log("[BG-POLL] no ALL_MESSAGES conversations and no local MOBILE_ONLY runs — not starting");
@@ -141,6 +150,7 @@ export async function startBackgroundPollingForProfile(profile: Profile | null):
       notifiedRunIds: [],
       avatarShape,
     });
+    pollerRunning = true;
   } finally {
     startInFlight = false;
   }
@@ -149,4 +159,88 @@ export async function startBackgroundPollingForProfile(profile: Profile | null):
 /** Stop the native poller (app returned to foreground). */
 export async function stopBackgroundPolling(): Promise<void> {
   await nativeStopPolling();
+  pollerRunning = false;
+}
+
+/** True once startPolling has succeeded this app session (poller is live). */
+let pollerRunning = false;
+
+/**
+ * Send-time-armed one-shot specs, keyed by conversation. Tracked so a
+ * re-enumeration (AppState change) rebuilds the watched map WITHOUT losing
+ * specs armed for sessions that already unmounted. Entries are removed by
+ * disarmMobileOnlyOneShot (send failure). Native-side retirement (turn
+ * completed) is invisible to JS — stale entries are harmless: re-arming an
+ * already-retired conversation just watches for the next local turn, and
+ * re-push on enumeration refreshes a spec that retired natively mid-cycle.
+ */
+const armedOneShots = new Map<string, NativeConversationSpec>();
+
+/**
+ * Send-time arm of the one-shot MOBILE_ONLY watch. Called the moment a
+ * local run starts — BEFORE the user can leave the screen — so delivery
+ * no longer depends on the chat session staying mounted (the leave-screen
+ * gap: session unmount tears down the JS callback, and no AppState change
+ * fires to trigger enumeration while the app stays foreground).
+ *
+ * If the poller is live, arms incrementally (no re-enumeration, no API
+ * calls). If not running yet (cold start: no ALL_MESSAGES conversations
+ * anywhere), falls back to a full start with just this spec — the poller
+ * service then runs until retired.
+ *
+ * Only call this for MOBILE_ONLY conversations: arming an ALL_MESSAGES
+ * conversation would overwrite its regular (non-one-shot) watch with a
+ * one-shot that retires after a single turn.
+ */
+export async function armMobileOnlyOneShot(
+  conversationId: string,
+  meta: { agentId: string; title: string; agentName?: string },
+  conn: { profile: Profile; secret: string } | null,
+): Promise<void> {
+  const spec: NativeConversationSpec = {
+    conversationId,
+    agentId: meta.agentId,
+    title: meta.title,
+    agentName: meta.agentName,
+    onlyLocalRun: true,
+  };
+  armedOneShots.set(conversationId, spec);
+  if (pollerRunning) {
+    const armed = await nativeArmOneShot(spec);
+    if (armed) {
+      nativelyWatched.add(conversationId);
+      console.log(`[BG-POLL] one-shot armed at send (live) conv=${conversationId.slice(-8)}`);
+      return;
+    }
+    // Service died underneath us (stopped/crashed) — cold-start with this spec.
+    console.log(`[BG-POLL] arm fell through to cold start conv=${conversationId.slice(-8)}`);
+  }
+  // Cold start: poller not running. The caller passes the connection it
+  // already resolved for the send (profile + secret) — no context lookup.
+  if (!conn || !conn.secret) {
+    console.log("[BG-POLL] one-shot arm aborted — no connection");
+    return;
+  }
+  const avatarShape = await loadAvatarShape();
+  nativelyWatched.add(conversationId);
+  pollerRunning = true;
+  await nativeStartPolling({
+    conversations: [spec],
+    baseUrl:
+      conn.profile.type === "remote" && conn.profile.url
+        ? conn.profile.url.replace(/^ws:/i, "http:").replace(/^wss:/i, "https:")
+        : "https://api.letta.com",
+    token: conn.secret,
+    pollStartedAt: Date.now(),
+    notifiedRunIds: [],
+    avatarShape,
+  });
+  console.log(`[BG-POLL] one-shot armed at send (cold start) conv=${conversationId.slice(-8)}`);
+}
+
+/** Disarm a send-time one-shot (send failed — nothing to wait for). */
+export async function disarmMobileOnlyOneShot(conversationId: string): Promise<void> {
+  armedOneShots.delete(conversationId);
+  nativelyWatched.delete(conversationId);
+  await nativeDisarmOneShot(conversationId);
 }
