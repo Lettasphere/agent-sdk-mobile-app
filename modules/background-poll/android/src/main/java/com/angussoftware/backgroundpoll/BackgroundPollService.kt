@@ -80,8 +80,18 @@ class BackgroundPollService : Service() {
 
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
     if (intent == null) {
-      stopSelf()
-      return START_NOT_STICKY
+      // Null intent = sticky restart after process death. Restore the
+      // persisted watch state — if none, there is nothing to watch.
+      val restored = restorePersistedState()
+      if (!restored) {
+        Log.i(TAG, "sticky restart with no persisted state — stopping")
+        stopSelf()
+        return START_NOT_STICKY
+      }
+      startForeground(FGS_NOTIFICATION_ID, buildFgsNotification())
+      Log.i(TAG, "sticky restart restored convs=${conversations.size}")
+      scheduleSweeps()
+      return START_REDELIVER_INTENT
     }
     conversations = parseConversations(intent.getStringExtra("conversations"))
     watched.clear()
@@ -104,9 +114,18 @@ class BackgroundPollService : Service() {
     // the poll thread reads/writes this set under the same lock — an
     // unsynchronized clear/addAll here can corrupt dedup (duplicate
     // notifications) when a re-start lands between poll sweeps.
+    // REDELIVER reconciliation: a redelivered intent (process death) carries
+    // the ORIGINAL pollStartedAt (old runs stay eligible) but a STALE dedup
+    // seed — merge the persisted set so runs the dead instance already
+    // notified don't re-fire. For fresh enumeration starts pollStartedAt is
+    // now, so the merged old IDs are excluded by the time window anyway.
     synchronized(notifiedRunIds) {
       notifiedRunIds.clear()
       notifiedRunIds.addAll(intent.getStringArrayListExtra("notifiedRunIds") ?: ArrayList())
+      try {
+        val saved = getSharedPreferences(PREFS_NAME, MODE_PRIVATE).getStringSet("notifiedRunIds", null)
+        if (saved != null) notifiedRunIds.addAll(saved)
+      } catch (_: Exception) {}
     }
 
     if (conversations.isEmpty() || token.isEmpty()) {
@@ -115,17 +134,105 @@ class BackgroundPollService : Service() {
       return START_NOT_STICKY
     }
 
+    persistState()
+
     startForeground(FGS_NOTIFICATION_ID, buildFgsNotification())
     Log.i(TAG, "polling started convs=${conversations.size} interval=${pollIntervalMs}ms seeded=${notifiedRunIds.size}")
 
+    scheduleSweeps()
+    return START_REDELIVER_INTENT
+  }
+
+  private fun scheduleSweeps() {
     scheduler?.shutdownNow()
     scheduler = Executors.newSingleThreadScheduledExecutor { r ->
       Thread(r, "bg-run-poll").apply { isDaemon = true }
     }.also {
       it.scheduleWithFixedDelay({ pollOnce() }, 0L, pollIntervalMs, TimeUnit.MILLISECONDS)
     }
+  }
 
-    return START_NOT_STICKY
+  /**
+   * Persist watch state so a sticky restart (process killed, service
+   * re-delivered) restores the exact watch list instead of silently dying.
+   * Written on every explicit startPolling. One-shot (onlyLocalRun) specs
+   * are excluded — they are per-turn and must not survive a process death.
+   * notifiedRunIds are persisted from the poll thread's adds (best-effort,
+   * last-write-wins on the shared prefs editor).
+   */
+  private fun persistState() {
+    try {
+      val prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+      val arr = JSONArray()
+      for (spec in watched.values) if (!spec.onlyLocalRun) arr.put(specToJson(spec))
+      prefs.edit()
+        .putString("specs", arr.toString())
+        .putString("baseUrl", baseUrl)
+        .putString("token", token)
+        .putLong("pollStartedAt", pollStartedAt)
+        .putLong("pollIntervalMs", pollIntervalMs)
+        .putString("avatarShape", avatarShape)
+        .apply()
+    } catch (e: Exception) {
+      Log.w(TAG, "persist failed: ${e.message}")
+    }
+  }
+
+  /** Restore from persistState — false when nothing persisted. */
+  private fun restorePersistedState(): Boolean {
+    return try {
+      val prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+      val specsJson = prefs.getString("specs", null) ?: return false
+      token = prefs.getString("token", "") ?: ""
+      if (token.isEmpty()) return false
+      baseUrl = prefs.getString("baseUrl", "https://api.letta.com") ?: "https://api.letta.com"
+      pollStartedAt = prefs.getLong("pollStartedAt", 0L)
+      pollIntervalMs = prefs.getLong("pollIntervalMs", 20_000L)
+      avatarShape = prefs.getString("avatarShape", "circle") ?: "circle"
+      conversations = parseConversations(specsJson)
+      watched.clear()
+      for (c in conversations) watched[c.conversationId] = c
+      // Dedup: restored from prefs (the live set), NOT the redelivered
+      // intent's stale seed.
+      synchronized(notifiedRunIds) {
+        notifiedRunIds.clear()
+        notifiedRunIds.addAll(prefs.getStringSet("notifiedRunIds", emptySet()) ?: emptySet())
+      }
+      conversations.isNotEmpty()
+    } catch (e: Exception) {
+      Log.w(TAG, "restore failed: ${e.message}")
+      false
+    }
+  }
+
+  private fun specToJson(spec: ConversationSpec): JSONObject {
+    return JSONObject()
+      .put("conversationId", spec.conversationId)
+      .put("agentId", spec.agentId)
+      .put("title", spec.title)
+      .put("agentName", spec.agentName)
+      .put("onlyLocalRun", spec.onlyLocalRun)
+  }
+
+  /** Persist the dedup set (called under the notifiedRunIds lock). */
+  private fun persistNotifiedRunIds() {
+    try {
+      getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+        .edit()
+        .putStringSet("notifiedRunIds", HashSet(notifiedRunIds))
+        .apply()
+    } catch (_: Exception) {}
+  }
+
+  /**
+   * User swiped the app away: the process dies with the service. Keep the
+   * service scheduled — START_REDELIVER_INTENT restarts it with the null
+   * intent path restoring persisted state. Without this override the
+   * default behavior stops the service on task removal.
+   */
+  override fun onTaskRemoved(rootIntent: Intent?) {
+    Log.i(TAG, "task removed — service persists via redelivery")
+    super.onTaskRemoved(rootIntent)
   }
 
   /** conversations extra: JSON array [{"conversationId":"...","agentId":"...","title":"..."}] */
@@ -220,6 +327,7 @@ class BackgroundPollService : Service() {
         synchronized(notifiedRunIds) {
           isNew = notifiedRunIds.add(id)
           if (isNew && notifiedRunIds.size > 500) notifiedRunIds.clear()
+          if (isNew) persistNotifiedRunIds()
         }
         if (!isNew) continue
         val reply = findLatestAssistantText(convId, run.optString("created_at"))?.let { truncate(it) }
@@ -753,6 +861,7 @@ class BackgroundPollService : Service() {
       NotificationManagerCompat.from(context).cancel(conversationId.hashCode())
     }
     const val FGS_NOTIFICATION_ID = 93001
+    const val PREFS_NAME = "bg_poll_state"
     const val FGS_CHANNEL_ID = "background_polling"
     const val CONVERSATIONS_CHANNEL_ID = "conversations"
     /** Runs fetched per sweep — one request covers every watched conversation. */
