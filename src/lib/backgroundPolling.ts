@@ -24,6 +24,12 @@ const MAX_AGENTS = 10;
 
 let startInFlight = false;
 /**
+ * Resolvers waiting for the in-flight enumeration-driven start to drain.
+ * Send-time arms that hit the startInFlight defer branch wait on these,
+ * then re-check liveness and arm live (or cold if the enumeration failed).
+ */
+let startDrainWaiters: (() => void)[] = [];
+/**
  * Conversation ids handed to the native poller this session. The JS-side
  * notification path (chat.tsx handleRunCompletion) consults this to avoid
  * DOUBLE notifications: the poller posts the rich notification for watched
@@ -170,6 +176,12 @@ export async function startBackgroundPollingForProfile(profile: Profile | null):
     pollerRunning = true;
   } finally {
     startInFlight = false;
+    // Wake any send-time arms that deferred to this enumeration — they
+    // re-check poller liveness and arm live (or cold if this start failed
+    // and they still need to deliver their spec).
+    const waiters = startDrainWaiters;
+    startDrainWaiters = [];
+    for (const resolve of waiters) resolve();
   }
 }
 
@@ -185,11 +197,13 @@ let pollerRunning = false;
 /**
  * Send-time-armed one-shot specs, keyed by conversation. Tracked so a
  * re-enumeration (AppState change) rebuilds the watched map WITHOUT losing
- * specs armed for sessions that already unmounted. Entries are removed by
- * disarmMobileOnlyOneShot (send failure). Native-side retirement (turn
- * completed) is invisible to JS — stale entries are harmless: re-arming an
- * already-retired conversation just watches for the next local turn, and
- * re-push on enumeration refreshes a spec that retired natively mid-cycle.
+ * specs armed for sessions that already unmounted. RETIREMENT IS
+ * DETERMINISTIC: entries are removed on send failure (disarm), on local
+ * turn completion (chat.tsx retire), and on carry-over when the spec is
+ * found stale (native retirement or finished mounted run). Entries are
+ * NEVER blindly re-pushed: the poller cannot distinguish client identity,
+ * so a re-pushed dead spec would notify on external runs — the
+ * MOBILE_ONLY violation.
  */
 const armedOneShots = new Map<string, NativeConversationSpec>();
 
@@ -239,11 +253,25 @@ export async function armMobileOnlyOneShot(
     return;
   }
   if (startInFlight) {
-    // An enumeration-driven start is mid-flight: it carries this spec via
-    // the armedOneShots carry-over — starting a second polling instance
-    // here would replace the full spec list with just this one.
-    console.log(`[BG-POLL] one-shot arm deferred to in-flight enumeration conv=${conversationId.slice(-8)}`);
-    return;
+    // An enumeration-driven start is mid-flight. Do NOT simply return: the
+    // enumeration may fail (leaving the poller cold), and this spec must be
+    // delivered regardless. Wait for the drain, then re-check liveness and
+    // arm live — or fall through to the cold start if it never came up.
+    console.log(`[BG-POLL] one-shot arm waiting for in-flight enumeration conv=${conversationId.slice(-8)}`);
+    await new Promise<void>((resolve) => {
+      startDrainWaiters.push(resolve);
+    });
+    if (pollerRunning) {
+      const armed = await nativeArmOneShot(spec);
+      if (armed) {
+        nativelyWatched.add(conversationId);
+        console.log(`[BG-POLL] one-shot armed post-drain (live) conv=${conversationId.slice(-8)}`);
+        return;
+      }
+    }
+    // Enumeration drained without a live poller — fall through to cold
+    // start (armedOneShots still holds this spec for future carry-overs).
+    console.log(`[BG-POLL] one-shot arm fell through post-drain to cold start conv=${conversationId.slice(-8)}`);
   }
   const avatarShape = await loadAvatarShape();
   await nativeStartPolling({
