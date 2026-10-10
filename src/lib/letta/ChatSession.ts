@@ -178,6 +178,20 @@ export class ChatSession {
   hasLocalRunInFlight(): boolean {
     return this.localRunInFlight;
   }
+
+  /**
+   * Settle a stream_lost local turn with a definitive outcome. Exactly-once:
+   * clears the pending settlement FIRST, then fires onTurnCompleted. Shared
+   * by every settling signal (loop_status, definitive result, REST tail).
+   * `success: null` means the run was observed terminal on REST without a
+   * pass/fail distinction — treated as inconclusive, same as the old
+   * stream_lost notification, but now fired only once the outcome is KNOWN.
+   */
+  private settleLocalOutcome(success: boolean | null): void {
+    if (!this.pendingLocalSettlement) return;
+    this.pendingLocalSettlement = null;
+    if (this.onTurnCompleted) this.onTurnCompleted(success !== false);
+  }
   /** Fired when a run started from THIS app completes (success or failure). */
   onTurnCompleted: ((success: boolean) => void) | null = null;
   /**
@@ -250,6 +264,16 @@ export class ChatSession {
   onSendFailed: ((reason: string) => void) | null = null;
   /** True while a locally-initiated run is in flight (distinguishes local vs external). */
   private localRunInFlight = false;
+  /**
+   * A local turn whose stream died mid-run (stream_lost): the outcome is
+   * UNKNOWN and the turn is NOT complete. Settling signals — loop_status
+   * returning to IDLE on a reconnected stream, a definitive (non-stream_lost)
+   * result frame, or the REST tail reconcile observing the run terminal —
+   * fire onTurnCompleted exactly once. Delivery ownership (the armed
+   * MOBILE_ONLY one-shot) stays with the native poller until then: retiring
+   * on the loss itself would leave a server-completing run unnotified.
+   */
+  private pendingLocalSettlement: { runIds: string[] } | null = null;
 
   private constructor(conn: { profile: Profile; secret: string }, conversationId: string, agentId: string) {
     this.conn = conn;
@@ -443,6 +467,10 @@ export class ChatSession {
     // status stay authoritative from here.
     if (this.snapshot.run === "idle") this.commit(patch(this.snapshot, { run: "running" }));
     this.localRunInFlight = true;
+    // A new send supersedes any unsettled stream_lost turn from before —
+    // its onTurnCompleted (if the poller hasn't retired delivery already)
+    // settles inconclusively so the new turn's callback is the live one.
+    if (this.pendingLocalSettlement) this.settleLocalOutcome(null);
     this.lastLocalStreamAt = Date.now();
     if (this.onLocalRunStarted) this.onLocalRunStarted();
     console.log(`[SEND] ${this.permLogTag} ${this.conversationId.slice(-8)} SDK-DISPATCH otid=${otid.slice(-8)} t=${Date.now()}`);
@@ -746,7 +774,9 @@ export class ChatSession {
       // Reopen-mid-run: a fresh session's stream can wedge behind the busy
       // run (second-subscriber contention) — if the device says a run is
       // processing and we didn't start it, reconcile over REST until idle.
-      if (!this.localRunInFlight && status.isProcessing) this.startExternalReconcile();
+      // Settlement window: our recovering run's device status must not
+      // start the external reconcile as if it were another client's run.
+      if (!this.localRunInFlight && !this.pendingLocalSettlement && status.isProcessing) this.startExternalReconcile();
       if (!status.isProcessing && !this.externalRunActive) this.stopExternalReconcile();
     });
     void session.getDeviceStatus().catch(() => {
@@ -846,6 +876,16 @@ export class ChatSession {
       if (terminal.id === this.lastSeenRunId) return;
       const previousRunId = this.lastSeenRunId;
       this.lastSeenRunId = terminal.id;
+      // Settling signal for a stream_lost local turn: REST observes the run
+      // terminal. If the held settlement names its runIds, match precisely;
+      // otherwise (SDK sent none) a NEW terminal run since the loss is the
+      // best available resolution — it fired after our send.
+      if (this.pendingLocalSettlement) {
+        const held = this.pendingLocalSettlement.runIds;
+        if (held.length === 0 || held.includes(terminal.id)) {
+          this.settleLocalOutcome(terminal.status === "completed" ? true : terminal.status === "failed" ? false : null);
+        }
+      }
       // New run completed — chase messages until the write is visible. On
       // failure, revert the marker so the next sweep re-chases: message
       // indexing lag can exceed any fixed budget, and a consumed run id
@@ -1080,6 +1120,10 @@ export class ChatSession {
   close(): void {
     console.log(`[SEND] ${this.permLogTag} ${this.conversationId.slice(-8)} CLOSE t=${Date.now()}`);
     this.closed = true;
+    // An unsettled stream_lost turn dies with the session: its one-shot
+    // delivery stays with the native poller (the leave-screen case), which
+    // owns notification from here regardless — nothing left to settle here.
+    this.pendingLocalSettlement = null;
     this.stopExternalReconcile();
     if (this.heartbeatTimer) {
       clearInterval(this.heartbeatTimer);
@@ -1286,8 +1330,12 @@ export class ChatSession {
     // External run tracking: deltas arriving with no local turn in flight
     // belong to a run another client started. `result` frames are only
     // synthesized for locally-sent turns, so completion is detected from the
-    // server's loop_status broadcast (IDLE) in reduce().
-    if (!this.localRunInFlight) {
+    // server's loop_status broadcast (IDLE) in reduce(). Exception: while a
+    // stream_lost settlement is pending, traffic on this session is most
+    // plausibly OUR run recovering (the SDK reconnects and replays) — those
+    // deltas must NOT flip externalRunActive, or loop_status IDLE would
+    // double-fire onExternalRunCompleted alongside settleLocalOutcome.
+    if (!this.localRunInFlight && !this.pendingLocalSettlement) {
       if (message.type === "assistant" || message.type === "reasoning" || message.type === "tool_call" || message.type === "tool_result") {
         this.externalRunActive = true;
         this.startExternalReconcile();
@@ -1533,10 +1581,19 @@ export class ChatSession {
         // what used to make a freshly-opened chat show a phantom turn, since
         // opening one reports WAITING_ON_INPUT.
         const status = message.status.toUpperCase();
+        // Settling signal for a stream_lost local turn: the loop itself
+        // reports no active runs — the outcome (completed server-side or
+        // halted) is now known enough to fire onTurnCompleted. Inconclusive
+        // (null): loop_status says the loop parked, not whether the run's
+        // content succeeded — the REST tail already landed whatever exists.
+        if (status === "IDLE" && this.pendingLocalSettlement) {
+          this.settleLocalOutcome(null);
+        }
         // External run completion: loop_status returning to IDLE after we saw
         // another client's run traffic is the only terminal signal external
-        // runs produce on this session (no `result` frame for them).
-        if (!this.localRunInFlight) {
+        // runs produce on this session (no `result` frame for them). Skipped
+        // during a pending settlement (our own recovering run's traffic).
+        if (!this.localRunInFlight && !this.pendingLocalSettlement) {
           if (!status.startsWith("WAITING") && status !== "IDLE") {
             this.externalRunActive = true;
             this.startExternalReconcile();
@@ -1575,10 +1632,39 @@ export class ChatSession {
         // the run was started from this app (local) or another client.
         // The UI checks isScreenVisible + notification mode to decide
         // whether to post a system notification. A lost stream is not a
-        // failed run — notify as inconclusive, not as failure.
+        // failed run — notify as inconclusive, not as failure. And an
+        // UNKNOWN outcome must not retire delivery ownership: the armed
+        // MOBILE_ONLY one-shot stays live until a settling signal (below).
         if (this.localRunInFlight) {
-          if (this.onTurnCompleted) this.onTurnCompleted(outcome.kind !== "failed");
-          this.localRunInFlight = false;
+          if (outcome.kind === "stream_lost") {
+            // Defer: hold settlement on this session. The run may complete
+            // server-side — loop_status IDLE, a definitive result on a
+            // reconnected stream, or the REST tail reconcile settles it
+            // (settleLocalOutcome below fires onTurnCompleted exactly once).
+            this.pendingLocalSettlement = {
+              runIds: message.runIds ?? [],
+            };
+            // Clear the in-flight flag so the heartbeat's REST reconcile
+            // loop can run for this conversation (it skips local runs) —
+            // that reconcile is a settling signal while the stream is dead.
+            this.localRunInFlight = false;
+          } else {
+            // A definitive result while a settlement is pending (reconnected
+            // stream delivered the real outcome): prefer it — it carries the
+            // actual success/failure.
+            this.pendingLocalSettlement = null;
+            if (this.onTurnCompleted) this.onTurnCompleted(outcome.kind !== "failed");
+            this.localRunInFlight = false;
+          }
+        } else if (this.pendingLocalSettlement) {
+          // The deferred turn's result arrived without a local flag (it was
+          // cleared at deferral) — settle with the definitive outcome.
+          if (outcome.kind === "stream_lost") {
+            // A SECOND stream loss while unsettled: keep waiting (the first
+            // deferral's runIds still govern).
+          } else {
+            this.settleLocalOutcome(outcome.kind !== "failed");
+          }
         } else {
           if (this.onExternalRunCompleted) this.onExternalRunCompleted(outcome.kind !== "failed");
         }
