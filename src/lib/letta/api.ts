@@ -90,8 +90,42 @@ export function isAuthError(e: unknown): boolean {
   return /\b401\b|\b403\b|unauthori[sz]ed|forbidden|invalid (api key|token|credential)|invalid_grant|credentials/i.test(message);
 }
 
+/**
+ * Cached portable SDK clients, keyed by (profile id, url, secret).
+ *
+ * SDK 0.8.39 clients pool a management connection (a persistent WebSocket on
+ * the remote backend), so constructing one per call leaks a socket per call
+ * site. The secret participates in the key so an OAuth token rotation gets a
+ * fresh client naturally — the old one is closed (idempotent, fire-and-forget;
+ * sessions own their own sockets and survive an evicted client per the SDK's
+ * close() contract). The cache is bounded by the profile count; keys churn
+ * only on token rotation or URL edits.
+ */
+const clientCache = new Map<string, LettaAgentClient>();
+
+function cacheKey(conn: Connection): string {
+  return `${conn.profile.id}|${conn.profile.url}|${conn.secret}`;
+}
+
 /** The portable SDK client for the active connection. Used for createAgent and sessions. */
 export function sdkClient(conn: Connection): LettaAgentClient {
+  const key = cacheKey(conn);
+  const cached = clientCache.get(key);
+  if (cached) return cached;
+  const created = createSdkClient(conn);
+  // Evict any stale entry for the same profile (rotated secret/URL) and close
+  // it — close() is idempotent in 0.8.39 and never rejects.
+  for (const [existingKey, existing] of clientCache) {
+    if (existingKey.startsWith(`${conn.profile.id}|`) && existingKey !== key) {
+      clientCache.delete(existingKey);
+      void existing.close().catch(() => {});
+    }
+  }
+  clientCache.set(key, created);
+  return created;
+}
+
+function createSdkClient(conn: Connection): LettaAgentClient {
   if (conn.profile.type === "cloud") {
     return new LettaAgentClient({
       backend: "cloud",

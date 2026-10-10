@@ -27,6 +27,7 @@ import { mergeTranscript } from "./echoMerge";
 import { emptyChat, type ApprovalRequest, type ChatSnapshot, type PermissionMode, type ToolStatus, type TranscriptItem } from "./model";
 import { patch } from "./mockSession";
 import { contentToText, formatToolInput } from "./toolText";
+import { classifyResult, classifyStreamError } from "./terminal";
 import { newestTextKey, projectRows, type ProjectionState } from "./transcriptProjection";
 import {
   resolveEffectivePermission,
@@ -1491,6 +1492,11 @@ export class ChatSession {
     });
   }
 
+  /** Contract-test seam: drives one SDK message through the reducer. */
+  reduceForTest(snapshot: ChatSnapshot, message: SDKMessage): ChatSnapshot {
+    return this.reduce(snapshot, message);
+  }
+
   private reduce(snapshot: ChatSnapshot, message: SDKMessage): ChatSnapshot {
     switch (message.type) {
       case "init":
@@ -1560,23 +1566,40 @@ export class ChatSession {
         const interrupted = !message.success || message.stopReason === "interrupted";
         this.interruptedKey = interrupted ? newestTextKey(this.accumulator.rows()) : null;
         const idle = this.project(patch(snapshot, { run: "idle" }));
+        // Terminal classification (SDK 0.8.39 doctrine, terminal.ts): a
+        // stream_closed result is transport loss with an UNKNOWN outcome —
+        // the run may complete server-side. It settles the turn (no more
+        // streaming visuals) but renders as uncertainty, not a failure row.
+        const outcome = classifyResult(message);
         // Notification hook: fire the appropriate callback based on whether
         // the run was started from this app (local) or another client.
         // The UI checks isScreenVisible + notification mode to decide
-        // whether to post a system notification.
+        // whether to post a system notification. A lost stream is not a
+        // failed run — notify as inconclusive, not as failure.
         if (this.localRunInFlight) {
-          if (this.onTurnCompleted) this.onTurnCompleted(message.success);
+          if (this.onTurnCompleted) this.onTurnCompleted(outcome.kind !== "failed");
           this.localRunInFlight = false;
         } else {
-          if (this.onExternalRunCompleted) this.onExternalRunCompleted(message.success);
+          if (this.onExternalRunCompleted) this.onExternalRunCompleted(outcome.kind !== "failed");
         }
-        return message.success
+        if (outcome.kind === "stream_lost") {
+          // Connection state already tells the story (the banner owns
+          // transport errors); nothing new to render on the transcript.
+          return patch(idle, { connection: "offline" });
+        }
+        return outcome.kind === "success"
           ? idle
-          : this.appendError(idle, message.errorDetail ?? message.error ?? "The run failed.");
+          : this.appendError(idle, outcome.detail);
       }
 
-      case "error":
+      case "error": {
+        const outcome = classifyStreamError(message);
         this.interruptedKey = newestTextKey(this.accumulator.rows());
+        if (outcome.kind === "stream_lost") {
+          // Transport loss mid-run (recoverable per the SDK): outcome
+          // unknown — surface via connection state, never as a failed run.
+          return patch(this.project(snapshot), { connection: "offline" });
+        }
         return this.appendError(
           this.project(snapshot),
           // Error events don't always carry a message (e.g. an
@@ -1586,6 +1609,7 @@ export class ChatSession {
               ? `The server rejected the request (${(message as { code?: string }).code}).`
               : "Something went wrong on the server."),
         );
+      }
 
       case "retry":
       default:
