@@ -46,6 +46,18 @@ Gates everything else. Treat as migration with contract tests, not a patch bump.
 - Contract-test the terminal-behavior changes in the shared core (Phase 2 package lands as the extraction of this work).
 - **Acceptance = Ezra's canary list, all green:** OAuth refresh; foreground/background mid-turn; approval recovery; queued sends; abort; images; long fragmented Markdown; conversation pagination; socket loss after send() before result.
 
+### Phase 1.5 — Desktop parity backlog (post-Phase 2, build order)
+Desktop gaps vs Android, sequenced so each lands as a thin pane over the shared core (no logic built twice):
+1. OAuth login (kills manual key entry)
+2. Send queue
+3. Profiles (multi-account)
+4. Attachments/images
+5. Env/computer picker + execution truth (doubles as Phase 3 operator groundwork)
+6. Angus theming tokens (independent of Phase 2 — can land anytime)
+
+Reverse parity (desktop → Android, lower urgency): memory editor (read-only first), BYOK providers (likely desktop-only).
+Not parity targets: background notifications (Phase 4 poller serves mobile), in-app updater, haptics/deep links.
+
 ### Phase 2 — Shared core package + parity
 - Extract `@angus/letta-client-core` (rules §2.4) from the Android codebase's lib/ (it has the battle-tested parts: transcript projection, echo merge, oauth, updater tests already exist).
 - Desktop consumes the same package. Parity target: identical reconciliation behavior on both.
