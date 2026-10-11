@@ -15,7 +15,7 @@
  * and replay bookkeeping. External content renders from here instead.
  */
 import type { TranscriptItem } from "./model";
-import { cleanUserText, summarizeToolInput, formatToolInput } from "./toolText";
+import { cleanUserText, summarizeToolInput, formatToolInput } from "@angus/letta-client-core";
 
 /** A single external message, normalized for ordering and rendering. */
 interface ExternalRecord {

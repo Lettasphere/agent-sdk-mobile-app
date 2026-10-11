@@ -98,7 +98,7 @@ import {
   resolvePermission,
   resolveEffectivePermission,
 } from "../lib/permissions";
-import { groupToolRuns, type TranscriptRowItem } from "../lib/letta/grouping";
+import { groupToolRuns, type TranscriptRowItem } from "@angus/letta-client-core";
 import { pickImages, type Attachment } from "../lib/letta/attachments";
 import { getSecret, saveProfile } from "../lib/profiles/profiles";
 import { useProfiles } from "../lib/profiles/ProfilesContext";

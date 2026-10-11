@@ -23,12 +23,10 @@ import { toImageContent, type Attachment } from "./attachments";
 import type { ComputerSelectorField, Profile } from "../profiles/profiles";
 import { getConversationModel, isAuthError, listComputers, listConversationMessages, listConversationRuns, sdkClient, updateConversationModel } from "./api";
 import { ExternalTranscriptStore } from "./ExternalTranscriptStore";
-import { mergeTranscript } from "./echoMerge";
+import { mergeTranscript } from "@angus/letta-client-core";
 import { emptyChat, type ApprovalRequest, type ChatSnapshot, type PermissionMode, type ToolStatus, type TranscriptItem } from "./model";
 import { patch } from "./mockSession";
-import { contentToText, formatToolInput } from "./toolText";
-import { classifyResult, classifyStreamError } from "./terminal";
-import { newestTextKey, projectRows, type ProjectionState } from "./transcriptProjection";
+import { classifyResult, classifyStreamError, contentToText, formatToolInput, newestTextKey, projectRows, type ProjectionState } from "@angus/letta-client-core";
 import {
   resolveEffectivePermission,
   saveConversationPerm,
