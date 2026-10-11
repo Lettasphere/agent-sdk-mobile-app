@@ -1,64 +1,34 @@
 /**
- * Per-conversation environment (computer) selection.
- *
- * The SDK's `computer` option is session-scoped by design; the app's
- * environment sheet used to write the selection to the PROFILE, which
- * silently rerouted every other conversation on that profile. This module
- * stores the selection per conversation in AsyncStorage (same pattern as
- * per-conversation notification settings), with three states:
- *
- *   - "unset"  → inherit the profile's selector (its value when the
- *                conversation last touched the sheet) — behavior
- *                identical to legacy for old conversations
- *   - null     → explicitly Cloud Sandbox (overrides a profile default)
- *   - selector → a specific computer
+ * Per-conversation environment (computer) selection — app adapter over the
+ * core module (@angus/letta-client-core env/conversationEnv). The logic
+ * (key scheme, sandbox/JSON/inherit semantics, isSelector shape guard) lives
+ * in the core, adapter-threaded over KeyValueStore; AsyncStorage implements
+ * the contract here. Same `letta.env.<id>` keys — existing stored selections
+ load unchanged.
  */
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import type { ComputerSelectorField } from "./profiles/profiles";
+import {
+  loadConversationEnv as coreLoad,
+  saveConversationEnv as coreSave,
+  type ConversationEnv,
+  type KeyValueStore,
+} from "@angus/letta-client-core";
 
-const KEY = (conversationId: string) => `letta.env.${conversationId}`;
+const asyncStorageAdapter: KeyValueStore = {
+  get: (key) => AsyncStorage.getItem(key),
+  set: (key, value) => AsyncStorage.setItem(key, value),
+  delete: (key) => AsyncStorage.removeItem(key),
+};
 
-export interface ConversationEnv {
-  /** null = explicit Cloud Sandbox; undefined = inherit profile default. */
-  selector: ComputerSelectorField | null | undefined;
+export type { ConversationEnv } from "@angus/letta-client-core";
+
+export function loadConversationEnv(conversationId: string): Promise<ConversationEnv> {
+  return coreLoad(asyncStorageAdapter, conversationId);
 }
 
-export async function loadConversationEnv(
+export function saveConversationEnv(
   conversationId: string,
-): Promise<ConversationEnv> {
-  const raw = await AsyncStorage.getItem(KEY(conversationId));
-  if (raw === null) return { selector: undefined };
-  if (raw === "sandbox") return { selector: null };
-  try {
-    const parsed: unknown = JSON.parse(raw);
-    // Shape-validate: garbage JSON recovers to inherit, but valid JSON that
-    // isn't a selector (number, bool, …) would crash the chip render's
-    // `"name" in selector` check — treat it as corrupt and inherit instead.
-    if (isSelector(parsed)) return { selector: parsed };
-    return { selector: undefined };
-  } catch {
-    return { selector: undefined };
-  }
-}
-
-function isSelector(value: unknown): value is ComputerSelectorField {
-  if (typeof value !== "object" || value === null) return false;
-  const v = value as Record<string, unknown>;
-  if (typeof v.deviceId === "string" && typeof v.connectionId === "string") return true;
-  if (typeof v.deviceId === "string" && v.connectionId === undefined) return true;
-  if (typeof v.id === "string" && Object.keys(v).length === 1) return true;
-  if (typeof v.connectionId === "string" && v.deviceId === undefined && v.id === undefined) return true;
-  return false;
-}
-
-export async function saveConversationEnv(
-  conversationId: string,
-  selector: ComputerSelectorField | null,
+  selector: Parameters<typeof coreSave>[2],
 ): Promise<void> {
-  if (selector === undefined) {
-    await AsyncStorage.removeItem(KEY(conversationId));
-    return;
-  }
-  const raw = selector === null ? "sandbox" : JSON.stringify(selector);
-  await AsyncStorage.setItem(KEY(conversationId), raw);
+  return coreSave(asyncStorageAdapter, conversationId, selector);
 }

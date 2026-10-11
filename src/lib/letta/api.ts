@@ -19,7 +19,7 @@ import type {
 } from "@letta-ai/letta-agent-sdk/client";
 
 import { CLOUD_DEFAULT_URL, type Profile } from "../profiles/profiles";
-import { OAuthTokenError } from "../auth/oauthTokens";
+import { OAuthTokenError } from "@angus/letta-client-core";
 
 // Re-exported so UI code imports from the app's data module. Definition lives
 // just below (widened with "max" — see the type comment there).

@@ -13,8 +13,9 @@ import {
   parseOAuthCredential,
   refreshOAuthCredential,
   revokeOAuthCredential,
+  type ComputerSelectorField,
   type OAuthCredential,
-} from "../auth/oauthTokens";
+} from "@angus/letta-client-core";
 
 export type ProfileType = "cloud" | "remote";
 export type CloudAuthMethod = "oauth" | "api_key";
@@ -24,15 +25,9 @@ export type CloudAuthMethod = "oauth" | "api_key";
  * SDK's `ComputerSelector` — a string name, or an object with
  * deviceId/id/connectionId. When absent, the SDK provisions a managed sandbox.
  */
-export type ComputerSelectorField =
-  | string
-  | { name: string }
-  | { deviceId: string }
-  | { id: string }
-  | { connectionId: string; name?: string }
-  /** Preferred: stable device identity + display name; the connection lease
-   *  is resolved at session-attach time (leases change on remote restarts). */
-  | { deviceId: string; connectionId: string; name?: string };
+// ComputerSelectorField now lives in @angus/letta-client-core (env/selector.ts)
+// — re-exported so Profile's import surface stays stable.
+export type { ComputerSelectorField };
 
 export interface Profile {
   id: string;
