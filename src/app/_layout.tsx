@@ -7,7 +7,7 @@ import { BottomSheetModalProvider } from "@gorhom/bottom-sheet";
 import { Stack } from "expo-router";
 import { StatusBar } from "expo-status-bar";
 import { useEffect, useRef } from "react";
-import { AppState, Platform } from "react-native";
+import { AppState } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { checkForUpdate, setPendingUpdate } from "../lib/updater";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
@@ -16,7 +16,6 @@ import * as Notifications from "expo-notifications";
 import { ProfilesProvider, useProfiles } from "../lib/profiles/ProfilesContext";
 import { configureNotifications, ensureChannel } from "../lib/notificationPoster";
 import { openChatWithBackStack, takePendingChatLink } from "../lib/chatDeepLink";
-import { deliveryServiceUrl, registerForPush, PUSH_MARKER_KEY } from "../lib/pushRegistration";
 import { startBackgroundPollingForProfile } from "../lib/backgroundPolling";
 import { ThemeProvider, useTheme } from "../theme/ThemeProvider";
 
@@ -46,58 +45,6 @@ function BackgroundPollingLifecycle() {
 
 const UPDATE_CHECK_KEY = "letta.update.lastCheck";
 const UPDATE_CHECK_INTERVAL_MS = 4 * 60 * 60 * 1000; // 4h
-
-/**
- * Push registration lifecycle (Phase 4 P3): register this device's REAL Expo
- * push token with the fleet delivery service. Runs on mount and on every
- * foreground (re-registration is idempotent — the service dedupes by token;
- * Android tokens can change on reinstall). Honest no-ops when the fleet
- * service is not configured (EXPO_PUBLIC_DELIVERY_SERVICE_URL), permission
- * is missing, or the Expo project is not provisioned yet (D5) — the app is
- * fully functional without push; the FGS poller remains the fallback.
- */
-function PushRegistrationLifecycle() {
-  useEffect(() => {
-    const serviceUrl = deliveryServiceUrl();
-    const projectId = process.env.EXPO_PUBLIC_EAS_PROJECT_ID;
-    const run = async () => {
-      if (!serviceUrl) return;
-      await registerForPush(serviceUrl, {
-        hasPermission: async () => {
-          const { status } = await Notifications.getPermissionsAsync();
-          return status === "granted";
-        },
-        getToken: async () => {
-          const { data: token } = await Notifications.getExpoPushTokenAsync(
-            projectId ? { projectId } : undefined,
-          );
-          return token;
-        },
-        platform: Platform.OS,
-        register: async (url, pushToken, platform) => {
-          const response = await fetch(`${url}/devices?userId=operator`, {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({ pushToken, platform }),
-          });
-          if (!response.ok) {
-            throw new Error(`delivery service rejected registration (${response.status})`);
-          }
-        },
-        readMarker: () => AsyncStorage.getItem(PUSH_MARKER_KEY),
-        writeMarker: (token) => AsyncStorage.setItem(PUSH_MARKER_KEY, token),
-        log: (message) => console.log(`[push] ${message}`),
-      });
-    };
-    void run();
-    const sub = AppState.addEventListener("change", (state) => {
-      if (state === "active") void run();
-    });
-    return () => sub.remove();
-  }, []);
-
-  return null;
-}
 
 /**
  * Checks for app updates on foreground, at most every 4h. Result is surfaced
@@ -199,7 +146,6 @@ export default function RootLayout() {
         <ProfilesProvider>
           <BackgroundPollingLifecycle />
       <UpdateCheckLifecycle />
-      <PushRegistrationLifecycle />
           <BottomSheetModalProvider>
             <ThemedStack />
           </BottomSheetModalProvider>
