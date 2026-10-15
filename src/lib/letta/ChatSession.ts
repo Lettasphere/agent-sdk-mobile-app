@@ -374,8 +374,23 @@ export class ChatSession {
     } else if (raw && typeof raw === "object" && "connectionId" in raw) {
       computer = { connectionId: raw.connectionId };
     }
+    // Permission mode AT session creation (atomic — no race window): the
+    // post-attach changeDeviceState restore raced sends and could bind to a
+    // different device lease than the run's, leaving turns executing in
+    // standard mode with approval walls the user believed were off
+    // ("unrestricted" bug: intermittent prompts despite the setting).
+    // AsyncStorage reads are cheap; a failed read just means the server-side
+    // default stands until the post-attach restore lands (unchanged behavior).
+    const initialPerm = await resolveEffectivePermission(
+      this.conversationId,
+      this.agentId,
+      this.conn.profile.id,
+    ).catch(() => undefined);
     this.session = client.resumeSession(this.conversationId, {
       ...(computer ? { computer } : {}),
+      ...(initialPerm && isConcretePerm(initialPerm)
+        ? { permissionMode: toSdkPermissionMode(initialPerm) }
+        : {}),
       // Tool approvals surface as an ApprovalRequest in the snapshot; the
       // ApprovalCard resolves it via resolveApproval(). The run stays in
       // awaiting_approval until the user decides.
