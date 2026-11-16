@@ -51,8 +51,13 @@ export const ModelSheet = forwardRef<BottomSheetModal, Props>(function ModelShee
 ) {
   const { colors } = useTheme();
   const [search, setSearch] = useState("");
+  // Validate against the SELECTED provider's tiers (not ALL_EFFORTS): an
+  // arriving effort outside the provider subset would render unselected yet
+  // still commit on the next model tap. (Uncia N1, PR #6.)
   const [effort, setEffort] = useState<ReasoningEffort | null>(
-    ALL_EFFORTS.includes(currentEffort as ReasoningEffort) ? (currentEffort as ReasoningEffort) : null,
+    supportedEffortsFor(currentModel).includes(currentEffort as ReasoningEffort)
+      ? (currentEffort as ReasoningEffort)
+      : null,
   );
 
   const filtered = models.filter(
