@@ -291,7 +291,10 @@ export default function ConversationsScreen() {
             autoCapitalize="none"
             style={[styles.search, { backgroundColor: colors.surface, borderColor: colors.surfaceEdge, color: colors.ink }]}
           />
-          {Object.keys(chatMeta.readCursors).length > 0 ? (
+          {visible.some(
+            (c) => c.lastMessageAt !== undefined &&
+              (chatMeta.readCursors[c.id] ?? 0) < new Date(c.lastMessageAt).getTime(),
+          ) ? (
             <Touchable
               accessibilityRole="button"
               accessibilityLabel="Mark all read"

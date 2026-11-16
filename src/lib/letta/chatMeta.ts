@@ -20,7 +20,17 @@ const EMPTY: ChatMeta = { pinned: [], readCursors: {} };
 async function load(profileId: string): Promise<ChatMeta> {
   try {
     const raw = await AsyncStorage.getItem(KEY(profileId));
-    return raw ? { ...EMPTY, ...(JSON.parse(raw) as ChatMeta) } : EMPTY;
+    if (!raw) return EMPTY;
+    const parsed = JSON.parse(raw) as Partial<ChatMeta>;
+    // Guard against externally-corrupted shapes (null fields survive the
+    // cast and crash .includes during render): coerce to known-good arrays.
+    return {
+      pinned: Array.isArray(parsed.pinned) ? parsed.pinned : [],
+      readCursors:
+        parsed.readCursors && typeof parsed.readCursors === "object" && !Array.isArray(parsed.readCursors)
+          ? parsed.readCursors
+          : {},
+    };
   } catch {
     return EMPTY;
   }
