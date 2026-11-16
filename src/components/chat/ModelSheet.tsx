@@ -14,7 +14,28 @@ import { Sheet } from "../ui/Sheet";
 import { Text } from "../ui/Text";
 import { Touchable } from "../ui/Touchable";
 
-const EFFORTS: ReasoningEffort[] = ["none", "minimal", "low", "medium", "high", "xhigh"];
+/**
+ * Effort tiers per provider family — derived-until-the-API-populates table
+ * (reasoning_capabilities probed null across the catalog Nov 16; mirrors the
+ * desktop client's store). Unknown provider = full list (the SDK validates
+ * at send and the turn errors visibly if the tier is unsupported).
+ */
+const PROVIDER_EFFORTS: Record<string, ReasoningEffort[]> = {
+  zai: ["low", "medium", "high"],
+  "z-ai": ["low", "medium", "high"],
+  "lc-zai-coding": ["low", "medium", "high"],
+  openai: ["none", "minimal", "low", "medium", "high"],
+  anthropic: ["low", "medium", "high"],
+  google: ["low", "medium", "high"],
+  deepseek: ["low", "medium", "high"],
+};
+const ALL_EFFORTS: ReasoningEffort[] = ["none", "minimal", "low", "medium", "high", "xhigh"];
+
+function supportedEffortsFor(handle: string | null | undefined): ReasoningEffort[] {
+  if (!handle) return ALL_EFFORTS;
+  const provider = handle.split("/")[0] ?? "";
+  return PROVIDER_EFFORTS[provider] ?? ALL_EFFORTS;
+}
 
 interface Props {
   models: ModelOption[];
@@ -31,7 +52,7 @@ export const ModelSheet = forwardRef<BottomSheetModal, Props>(function ModelShee
   const { colors } = useTheme();
   const [search, setSearch] = useState("");
   const [effort, setEffort] = useState<ReasoningEffort | null>(
-    EFFORTS.includes(currentEffort as ReasoningEffort) ? (currentEffort as ReasoningEffort) : null,
+    ALL_EFFORTS.includes(currentEffort as ReasoningEffort) ? (currentEffort as ReasoningEffort) : null,
   );
 
   const filtered = models.filter(
@@ -55,7 +76,7 @@ export const ModelSheet = forwardRef<BottomSheetModal, Props>(function ModelShee
           Reasoning effort
         </Text>
         <View style={[styles.segment, { borderColor: colors.surfaceEdge }]}>
-          {EFFORTS.map((e) => (
+          {supportedEffortsFor(models.find((m) => m.handle === currentModel)?.handle).map((e) => (
             <Touchable
               key={e}
               accessibilityRole="button"
