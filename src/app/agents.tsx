@@ -7,59 +7,30 @@
 import type { BottomSheetModal } from "@gorhom/bottom-sheet";
 import { router, useFocusEffect } from "expo-router";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ActivityIndicator, Alert, FlatList, RefreshControl, StyleSheet, TextInput, View } from "react-native";
+import { Alert, FlatList, RefreshControl, StyleSheet, TextInput, View } from "react-native";
 
 import { Bloop } from "../components/ui/Bloop";
-import { Sheet } from "../components/ui/Sheet";
-import { Dropdown } from "../components/ui/Dropdown";
 import { EmptyState } from "../components/ui/EmptyState";
 import { Header, Screen } from "../components/ui/Screen";
+import { Sheet } from "../components/ui/Sheet";
 import { SkeletonList } from "../components/ui/Skeleton";
 import { StatusDot } from "../components/ui/StatusDot";
 import { Text } from "../components/ui/Text";
-import { Image } from "expo-image";
-import AsyncStorage from "@react-native-async-storage/async-storage";
 import { Touchable } from "../components/ui/Touchable";
-import { ModelSheet } from "../components/chat/ModelSheet";
 import { haptic } from "../lib/haptics";
-import { loadPinned, pinnedAgentsKey, togglePinned } from "../lib/favorites";
 import {
-  applyModelToConversations,
   createAgent,
   deleteAgent,
-  fetchAgentProfilePicture,
-  fetchRunActivity,
   listAgents,
-  listConversations,
   listModels,
   updateAgent,
   type AgentSummary,
   type ModelOption,
 } from "../lib/letta/api";
-import { getSecret, type Profile } from "../lib/profiles/profiles";
+import { getSecret } from "../lib/profiles/profiles";
 import { useProfiles } from "../lib/profiles/ProfilesContext";
 import { useTheme } from "../theme/ThemeProvider";
 import { radius, space } from "../theme/tokens";
-import {
-  NotificationMode,
-  labelWithResolution,
-  loadAppDefault,
-  loadServerSetting,
-  saveServerSetting,
-  resolveMode,
-  resetServerDownstreamNotifications,
-} from "../lib/notifications";
-import {
-  PermissionCascadeMode,
-  type PermissionCascadeValue,
-  permLabelWithResolution,
-  permissionDetail,
-  loadAppPermDefault,
-  loadServerPerm,
-  saveServerPerm,
-  resolvePermission,
-  resetServerDownstreamPermissions,
-} from "../lib/permissions";
 
 function relativeTime(iso?: string): string {
   if (!iso) return "no activity yet";
@@ -78,21 +49,7 @@ function shortModel(model: string): string {
   return model.includes("/") ? model.split("/").slice(1).join("/") : model;
 }
 
-function AgentRow({
-  agent,
-  avatarUrl,
-  running,
-  pinned,
-  onPress,
-  onLongPress,
-}: {
-  agent: AgentSummary;
-  avatarUrl?: string;
-  running?: boolean;
-  pinned?: boolean;
-  onPress: () => void;
-  onLongPress: () => void;
-}) {
+function AgentRow({ agent, onPress, onLongPress }: { agent: AgentSummary; onPress: () => void; onLongPress: () => void }) {
   const { colors } = useTheme();
   return (
     <Touchable
@@ -104,22 +61,14 @@ function AgentRow({
       style={styles.row}
     >
       <View style={styles.rowInner}>
-        {avatarUrl ? (
-          <Image source={{ uri: avatarUrl }} style={styles.avatar} contentFit="cover" transition={150} />
-        ) : (
-          <Bloop id={agent.id} />
-        )}
+        <Bloop id={agent.id} />
         <View style={styles.rowText}>
           <Text role="bodyEm" numberOfLines={1}>
-            {pinned ? "★ " : ""}
             {agent.name}
           </Text>
           <View style={styles.meta}>
-            {running ? (
-              <ActivityIndicator size="small" color={colors.accent} />
-            ) : null}
-            <Text role="sub" ink={2} numberOfLines={1} style={{ flex: 1 }}>
-              {agent.description?.trim() || shortModel(agent.model)}
+            <Text role="sub" ink={2} mono numberOfLines={1}>
+              {shortModel(agent.model)}
             </Text>
             <Text role="sub" ink={3}>
               · {relativeTime(agent.lastActive)}
@@ -132,52 +81,6 @@ function AgentRow({
   );
 }
 
-/**
- * Profile-picture cache: AsyncStorage key per agent holds the fetched data
- * URL + the MemFS commit it came from. A changed commit re-fetches; the same
- * commit keeps the cached image (avoids re-downloading on every visit).
- */
-const AVATAR_CACHE_PREFIX = "letta.avatar.";
-
-/**
- * Cache-first: a stored avatar renders instantly, then a background request
- * validates the MemFS commit — the image is only re-downloaded when the
- * commit changed. Returns the cache hit immediately (null = nothing cached
- * and/or nothing on the server — the caller falls back to the Bloop mark).
- */
-async function loadAgentAvatar(
-  conn: { profile: Profile; secret: string },
-  agentId: string,
-): Promise<string | null> {
-  let cachedDataUrl: string | null = null;
-  try {
-    const cached = await AsyncStorage.getItem(AVATAR_CACHE_PREFIX + agentId);
-    if (cached) {
-      const parsed = JSON.parse(cached) as { dataUrl?: string };
-      if (parsed.dataUrl) cachedDataUrl = parsed.dataUrl;
-    }
-  } catch {
-    // Cache read failure is invisible — fall through to the network.
-  }
-  const fresh = await fetchAgentProfilePicture(conn, agentId);
-  if (!fresh) return cachedDataUrl;
-  if (cachedDataUrl) {
-    try {
-      const cached = await AsyncStorage.getItem(AVATAR_CACHE_PREFIX + agentId);
-      const parsed = cached ? (JSON.parse(cached) as { commitSha?: string | null }) : null;
-      if (parsed && parsed.commitSha === fresh.commitSha) return cachedDataUrl;
-    } catch {
-      // fall through — refresh the cache
-    }
-  }
-  try {
-    await AsyncStorage.setItem(AVATAR_CACHE_PREFIX + agentId, JSON.stringify(fresh));
-  } catch {
-    // Cache write failure is invisible too — the image still renders.
-  }
-  return fresh.dataUrl;
-}
-
 export default function AgentsScreen() {
   const { colors } = useTheme();
   const { activeProfile } = useProfiles();
@@ -185,15 +88,6 @@ export default function AgentsScreen() {
   const [error, setError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [search, setSearch] = useState("");
-  const [avatars, setAvatars] = useState<Record<string, string>>({});
-  const actionsSheetRef = useRef<BottomSheetModal>(null);
-  const [actionTarget, setActionTarget] = useState<AgentSummary | null>(null);
-  const [runningAgents, setRunningAgents] = useState<Set<string>>(new Set());
-  const [pinned, setPinned] = useState<Set<string>>(new Set());
-  useEffect(() => {
-    if (!activeProfile) return;
-    void loadPinned(pinnedAgentsKey(activeProfile.id)).then(setPinned);
-  }, [activeProfile]);
 
   // Create/edit sheet state.
   const sheetRef = useRef<BottomSheetModal>(null);
@@ -203,168 +97,14 @@ export default function AgentsScreen() {
   const [draftModel, setDraftModel] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
-  // Server settings sheet state — server-level notification + permission
-  // defaults, plus a reset that clears agent-level overrides under this server.
-  const settingsRef = useRef<BottomSheetModal>(null);
-  const [serverNotif, setServerNotif] = useState<NotificationMode>(NotificationMode.APP_DEFAULT);
-  const [serverNotifApp, setServerNotifApp] = useState<NotificationMode>(NotificationMode.OFF);
-  const [serverNotifResolved, setServerNotifResolved] = useState<NotificationMode>(NotificationMode.OFF);
-  const [serverPerm, setServerPerm] = useState<PermissionCascadeValue>(PermissionCascadeMode.APP_DEFAULT);
-  const [serverPermApp, setServerPermApp] = useState<PermissionCascadeValue>(PermissionCascadeMode.STANDARD);
-  const [serverPermResolved, setServerPermResolved] = useState<PermissionCascadeValue>(PermissionCascadeMode.STANDARD);
-
-  const refreshServerSettings = useCallback(async (profile: NonNullable<typeof activeProfile>) => {
-    const [notifSetting, notifApp, permSetting, permApp] = await Promise.all([
-      loadServerSetting(profile.id),
-      loadAppDefault(),
-      loadServerPerm(profile.id),
-      loadAppPermDefault(),
-    ]);
-    setServerNotif(notifSetting);
-    setServerNotifApp(notifApp);
-    setServerNotifResolved(resolveMode(notifSetting, notifSetting, notifSetting, notifApp));
-    setServerPerm(permSetting);
-    setServerPermApp(permApp);
-    setServerPermResolved(resolvePermission(permSetting, permSetting, permSetting, permApp));
-  }, []);
-
-  const openServerSettings = async () => {
-    if (!activeProfile) return;
-    await refreshServerSettings(activeProfile);
-    settingsRef.current?.present();
-  };
-
-  const selectServerNotif = async (mode: NotificationMode) => {
-    if (!activeProfile) return;
-    setServerNotif(mode);
-    setServerNotifResolved(resolveMode(mode, mode, mode, serverNotifApp));
-    await saveServerSetting(activeProfile.id, mode);
-  };
-
-  const selectServerPerm = async (mode: PermissionCascadeValue) => {
-    if (!activeProfile) return;
-    setServerPerm(mode);
-    setServerPermResolved(resolvePermission(mode, mode, mode, serverPermApp));
-    await saveServerPerm(activeProfile.id, mode);
-  };
-
-  // Reset downstream for this server: clears agent-level notification +
-  // permission overrides for every agent on this server.
-  const confirmReset = (title: string, message: string, run: () => Promise<void>) =>
-    Alert.alert(title, message, [
-      { text: "Cancel", style: "cancel" },
-      { text: "Reset", style: "destructive", onPress: () => void run() },
-    ]);
-
-  const resetServerNotifDownstream = async () => {
-    if (!activeProfile) return;
-    try {
-      const secret = (await getSecret(activeProfile.id)) ?? "";
-      const list = await listAgents({ profile: activeProfile, secret });
-      const agentIds = list.map((a) => a.id);
-      await resetServerDownstreamNotifications(agentIds);
-      Alert.alert("Reset complete", `Cleared notification overrides for ${agentIds.length} agents on ${activeProfile.name}.`);
-    } catch (e) {
-      Alert.alert("Couldn't reset", e instanceof Error ? e.message : undefined);
-    }
-  };
-
-  const resetServerPermDownstream = async () => {
-    if (!activeProfile) return;
-    try {
-      const secret = (await getSecret(activeProfile.id)) ?? "";
-      const list = await listAgents({ profile: activeProfile, secret });
-      const agentIds = list.map((a) => a.id);
-      await resetServerDownstreamPermissions(agentIds);
-      Alert.alert("Reset complete", `Cleared permission overrides for ${agentIds.length} agents on ${activeProfile.name}.`);
-    } catch (e) {
-      Alert.alert("Couldn't reset", e instanceof Error ? e.message : undefined);
-    }
-  };
-
-  // Downstream model application — pick a model, then apply it to every
-  // conversation on this server. The settings sheet is dismissed before the
-  // picker presents and re-presented when the picker closes (stacked-sheet
-  // minimize/restore is unreliable, so this flow is fully explicit).
-  const modelPickRef = useRef<BottomSheetModal>(null);
-  const [chosenModelHandle, setChosenModelHandle] = useState<string | null>(null);
-  const [applyingModel, setApplyingModel] = useState(false);
-  const [pickFromSettings, setPickFromSettings] = useState(false);
-  const chosenModelLabel = models.find((m) => m.handle === chosenModelHandle)?.label ?? null;
-
-  const openModelPick = () => {
-    if (!settingsRef.current) return;
-    setPickFromSettings(true);
-    settingsRef.current.dismiss();
-    modelPickRef.current?.present();
-  };
-
-  useEffect(() => {
-    if (!activeProfile) return;
-    void (async () => {
-      try {
-        const secret = (await getSecret(activeProfile.id)) ?? "";
-        setModels(await listModels({ profile: activeProfile, secret }));
-      } catch {
-        setModels([]);
-      }
-    })();
-  }, [activeProfile]);
-
-  const applyModelDownstream = async () => {
-    if (!activeProfile || !chosenModelHandle) return;
-    setApplyingModel(true);
-    try {
-      const secret = (await getSecret(activeProfile.id)) ?? "";
-      const agentIds = (await listAgents({ profile: activeProfile, secret })).map((a) => a.id);
-      const ids: string[] = [];
-      for (const id of agentIds) {
-        const convs = await listConversations({ profile: activeProfile, secret }, id, { limit: 100 });
-        ids.push(...convs.map((c) => c.id));
-      }
-      const { updated, failed } = await applyModelToConversations({ profile: activeProfile, secret }, ids, chosenModelHandle);
-      Alert.alert(
-        failed > 0 ? "Applied with failures" : "Model applied",
-        `${updated} conversation${updated === 1 ? "" : "s"} set to ${chosenModelLabel ?? chosenModelHandle}${failed > 0 ? `, ${failed} failed` : ""}.`,
-      );
-    } catch (e) {
-      Alert.alert("Couldn't apply model", e instanceof Error ? e.message : undefined);
-    } finally {
-      setApplyingModel(false);
-    }
-  };
-
   const load = useCallback(async () => {
-    const profile = activeProfile as Profile | null;
-    if (!profile) return;
+    if (!activeProfile) return;
     setError(null);
     try {
-      const secret = (await getSecret(profile.id)) ?? "";
-      const list = await listAgents({ profile, secret });
+      const secret = (await getSecret(activeProfile.id)) ?? "";
+      const list = await listAgents({ profile: activeProfile, secret });
       loadedAt.current = Date.now();
       setAgents(list);
-      // In-progress indicators: one sweep covers every agent. Refreshed on a
-      // cadence while the screen is shown — runs are transient, so a single
-      // sample at entry misses most of them.
-      const refreshActivity = () =>
-        void fetchRunActivity({ profile, secret }).then((activity) =>
-          setRunningAgents(activity.runningAgents),
-        );
-      refreshActivity();
-      const activityTimer = setInterval(refreshActivity, 20_000);
-      // Profile pictures load after the list renders — decoration, never a
-      // blocker. Fetched once per agents-load, cached by MemFS commit.
-      void (async () => {
-        const entries = await Promise.all(
-          list.map(async (agent) => [agent.id, await loadAgentAvatar({ profile, secret }, agent.id)] as const),
-        );
-        const next: Record<string, string> = {};
-        for (const [id, url] of entries) {
-          if (url) next[id] = url;
-        }
-        setAvatars(next);
-      })();
-      return () => clearInterval(activityTimer);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Couldn't load agents.");
       setAgents((prev) => prev ?? []);
@@ -453,13 +193,14 @@ export default function AgentsScreen() {
   };
 
   const showActions = (agent: AgentSummary) => {
-    setActionTarget(agent);
-    actionsSheetRef.current?.present();
+    Alert.alert(agent.name, undefined, [
+      { text: "Rename", onPress: () => openEdit(agent) },
+      { text: "Delete", style: "destructive", onPress: () => confirmDelete(agent) },
+      { text: "Cancel", style: "cancel" },
+    ]);
   };
 
-  const filtered = (agents ?? [])
-    .filter((a) => a.name.toLowerCase().includes(search.toLowerCase()))
-    .sort((a, b) => Number(pinned.has(b.id)) - Number(pinned.has(a.id)));
+  const filtered = (agents ?? []).filter((a) => a.name.toLowerCase().includes(search.toLowerCase()));
   const canSubmit = editing ? draftName.trim().length > 0 : draftModel !== null;
 
   return (
@@ -469,38 +210,26 @@ export default function AgentsScreen() {
         large
         back
         subtitle={
-          <View>
-            <Touchable
-              accessibilityRole="button"
-              accessibilityLabel={`Connection: ${activeProfile?.name ?? "none"}. Switch connection`}
-              onPress={() => router.dismissTo("/")}
-              style={styles.profileChipTouch}
-            >
-              <View style={styles.profileChip}>
-                <StatusDot tone={activeProfile ? "run" : "idle"} />
-                <Text role="sub" ink={2}>
-                  {activeProfile?.name ?? "No connection"}
-                </Text>
-              </View>
-            </Touchable>
-            <Text role="sub" ink={3}>
-              Long-press an agent for actions.
-            </Text>
-          </View>
+          <Touchable
+            accessibilityRole="button"
+            accessibilityLabel={`Connection: ${activeProfile?.name ?? "none"}. Switch connection`}
+            onPress={() => router.dismissTo("/")}
+            style={styles.profileChipTouch}
+          >
+            <View style={styles.profileChip}>
+              <StatusDot tone={activeProfile ? "run" : "idle"} />
+              <Text role="sub" ink={2}>
+                {activeProfile?.name ?? "No connection"}
+              </Text>
+            </View>
+          </Touchable>
         }
         trailing={
-          <View style={styles.headerActions}>
-            <Touchable accessibilityLabel="Settings" accessibilityRole="button" onPress={() => void openServerSettings()} style={styles.gear}>
-              <Text role="title" ink={2}>
-                ⚙
-              </Text>
-            </Touchable>
-            <Touchable accessibilityLabel="Create agent" accessibilityRole="button" onPress={openCreate} style={styles.add}>
-              <Text role="title" tone="accent">
-                ＋
-              </Text>
-            </Touchable>
-          </View>
+          <Touchable accessibilityLabel="Create agent" accessibilityRole="button" onPress={openCreate} style={styles.add}>
+            <Text role="title" tone="accent">
+              ＋
+            </Text>
+          </Touchable>
         }
       />
       {agents !== null && agents.length > 0 ? (
@@ -525,9 +254,6 @@ export default function AgentsScreen() {
           renderItem={({ item }) => (
             <AgentRow
               agent={item}
-              avatarUrl={avatars[item.id]}
-              running={runningAgents.has(item.id)}
-              pinned={pinned.has(item.id)}
               onPress={() => router.push({ pathname: "/conversations", params: { agentId: item.id, agentName: item.name } })}
               onLongPress={() => showActions(item)}
             />
@@ -552,11 +278,6 @@ export default function AgentsScreen() {
             ) : (
               <EmptyState message="No agents yet. Create your first one." actionLabel="Create agent" onAction={openCreate} />
             )
-          }
-          ListFooterComponent={
-            <Text role="sub" ink={3} style={styles.footer}>
-              Long-press an agent for actions.
-            </Text>
           }
         />
       )}
@@ -615,242 +336,20 @@ export default function AgentsScreen() {
           </Text>
         </Touchable>
       </Sheet>
-
-      <Sheet ref={settingsRef} title="Server settings" scroll>
-        <Dropdown
-          label="Permission default"
-          value={serverPerm}
-          options={
-            (
-              [
-                PermissionCascadeMode.STRICT,
-                PermissionCascadeMode.STANDARD,
-                PermissionCascadeMode.ACCEPT_EDITS,
-                PermissionCascadeMode.UNRESTRICTED,
-                PermissionCascadeMode.APP_DEFAULT,
-              ] as PermissionCascadeValue[]
-            ).map((option) => ({
-              value: option,
-              label: permLabelWithResolution(option, serverPermResolved),
-              detail: permissionDetail(option),
-              danger: option === PermissionCascadeMode.UNRESTRICTED,
-            }))
-          }
-          onSelect={(mode) => void selectServerPerm(mode)}
-        />
-        <Text role="sub" ink={3} style={styles.permHint}>
-          Default for agents on this server. Agents and conversations inherit this unless overridden.
-        </Text>
-
-        <Touchable
-          accessibilityRole="button"
-          accessibilityLabel="Reset all agent permission overrides to server default"
-          onPress={() =>
-            confirmReset(
-              "Reset agent permissions?",
-              "Clears permission overrides for all agents on this server. They will inherit from the server and app defaults.",
-              resetServerPermDownstream,
-            )
-          }
-          style={styles.resetBtn}
-        >
-          <Text role="body" tone="danger">
-            Reset all agent permission overrides
-          </Text>
-        </Touchable>
-
-        <View style={styles.sectionDivider} />
-
-        <Dropdown
-          label="Notification default"
-          value={serverNotif}
-          options={
-            (
-              [
-                NotificationMode.OFF,
-                NotificationMode.MOBILE_ONLY,
-                NotificationMode.ALL_MESSAGES,
-                NotificationMode.APP_DEFAULT,
-              ] as NotificationMode[]
-            ).map((option) => ({
-              value: option,
-              label: labelWithResolution(option, serverNotifResolved),
-              danger: option === NotificationMode.OFF,
-            }))
-          }
-          onSelect={(mode) => void selectServerNotif(mode)}
-        />
-        <Text role="sub" ink={3} style={styles.permHint}>
-          Default for agents on this server. Agents and conversations inherit this unless overridden.
-        </Text>
-
-        <Touchable
-          accessibilityRole="button"
-          accessibilityLabel="Reset all agent notification overrides to server default"
-          onPress={() =>
-            confirmReset(
-              "Reset agent notifications?",
-              "Clears notification overrides for all agents on this server. They will inherit from the server and app defaults.",
-              resetServerNotifDownstream,
-            )
-          }
-          style={styles.resetBtn}
-        >
-          <Text role="body" tone="danger">
-            Reset all agent notification overrides
-          </Text>
-        </Touchable>
-
-        <View style={styles.sectionDivider} />
-
-        <Text role="micro" ink={3} style={styles.sectionLabel}>
-          Model
-        </Text>
-        <Touchable
-          accessibilityRole="button"
-          accessibilityLabel={chosenModelLabel ? `Model: ${chosenModelLabel}` : "Choose a model"}
-          onPress={openModelPick}
-          style={styles.modelPickBtn}
-        >
-          <View style={styles.modelPickInner}>
-            <View style={styles.modelPickText}>
-              <Text role="body">{chosenModelLabel ?? "Choose a model…"}</Text>
-              {chosenModelHandle ? (
-                <Text role="sub" ink={3} mono numberOfLines={1}>
-                  {chosenModelHandle}
-                </Text>
-              ) : (
-                <Text role="sub" ink={3}>
-                  Applies to every conversation on this server
-                </Text>
-              )}
-            </View>
-            <Text role="body" ink={3}>
-              ▾
-            </Text>
-          </View>
-        </Touchable>
-        <Touchable
-          accessibilityRole="button"
-          accessibilityLabel="Apply model to all conversations on this server"
-          disabled={!chosenModelHandle || applyingModel}
-          onPress={() =>
-            confirmReset(
-              "Apply model to all conversations?",
-              `Sets every conversation on ${activeProfile?.name ?? "this server"} to ${chosenModelLabel}. Conversations already on this model are re-set harmlessly.`,
-              applyModelDownstream,
-            )
-          }
-          style={[styles.applyBtn, (!chosenModelHandle || applyingModel) && { opacity: 0.5 }]}
-        >
-          <Text role="body" tone="accent">
-            {applyingModel ? "Applying…" : "Apply model to all conversations"}
-          </Text>
-        </Touchable>
-      </Sheet>
-
-      <ModelSheet
-        ref={modelPickRef}
-        models={models}
-        currentModel={chosenModelHandle}
-        currentEffort={null}
-        onSelect={() => {}}
-        onPick={(handle) => {
-          setChosenModelHandle(handle);
-          modelPickRef.current?.dismiss();
-        }}
-        onSheetDismiss={() => {
-          if (pickFromSettings) {
-            setPickFromSettings(false);
-            settingsRef.current?.present();
-          }
-        }}
-      />
-      <Sheet
-        ref={actionsSheetRef}
-        title={actionTarget?.name ?? "Actions"}
-        onSheetDismiss={() => setActionTarget(null)}
-      >
-        {actionTarget ? (
-          (() => {
-            const key = activeProfile ? pinnedAgentsKey(activeProfile.id) : null;
-            const pinnedNow = pinned.has(actionTarget.id);
-            return (
-              <>
-                {key ? (
-                  <Touchable
-                    accessibilityRole="button"
-                    accessibilityLabel={pinnedNow ? `Unpin ${actionTarget.name}` : `Pin ${actionTarget.name} to top`}
-                    onPress={() => {
-                      void togglePinned(key!, actionTarget.id).then(setPinned);
-                      actionsSheetRef.current?.dismiss();
-                    }}
-                    style={styles.actionRow}
-                  >
-                    <Text role="body">{pinnedNow ? "★ Unpin" : "☆ Pin to top"}</Text>
-                  </Touchable>
-                ) : null}
-                <Touchable
-                  accessibilityRole="button"
-                  accessibilityLabel={`Rename ${actionTarget.name}`}
-                  onPress={() => {
-                    actionsSheetRef.current?.dismiss();
-                    openEdit(actionTarget);
-                  }}
-                  style={styles.actionRow}
-                >
-                  <Text role="body">Rename</Text>
-                </Touchable>
-                <Touchable
-                  accessibilityRole="button"
-                  accessibilityLabel={`Delete ${actionTarget.name}`}
-                  onPress={() => {
-                    actionsSheetRef.current?.dismiss();
-                    confirmDelete(actionTarget);
-                  }}
-                  style={styles.actionRow}
-                >
-                  <Text role="body" tone="danger">
-                    Delete
-                  </Text>
-                </Touchable>
-              </>
-            );
-          })()
-        ) : null}
-      </Sheet>
     </Screen>
   );
 }
 
 const styles = StyleSheet.create({
-  footer: { paddingVertical: 12, textAlign: "center" },
-  actionRow: { paddingVertical: 14 },
   list: { paddingBottom: space.xxl, flexGrow: 1 },
   row: { paddingHorizontal: space.gutter },
   rowInner: { flexDirection: "row", alignItems: "center", gap: space.md, paddingVertical: 14 },
-  avatar: { width: 40, height: 40, borderRadius: 20 },
   rowText: { flex: 1, gap: 2 },
   meta: { flexDirection: "row", alignItems: "center", gap: space.xs },
   divider: { height: StyleSheet.hairlineWidth, marginLeft: 52 },
   profileChip: { flexDirection: "row", alignItems: "center", gap: 6 },
   profileChipTouch: { minHeight: 24, alignSelf: "flex-start" },
   add: { paddingHorizontal: space.sm },
-  headerActions: { flexDirection: "row", alignItems: "center" },
-  gear: { paddingHorizontal: space.sm, marginRight: space.xs },
-  permHint: { paddingTop: space.md, fontStyle: "italic" },
-  resetBtn: { paddingVertical: space.sm, alignItems: "center" },
-  modelPickBtn: {
-    borderWidth: StyleSheet.hairlineWidth,
-    borderRadius: radius.row,
-    paddingHorizontal: space.md,
-    paddingVertical: 9,
-  },
-  modelPickInner: { flexDirection: "row", alignItems: "center", gap: space.sm },
-  modelPickText: { flex: 1, gap: 1 },
-  applyBtn: { paddingVertical: space.sm, alignItems: "center" },
-  sectionLabel: { paddingTop: space.sm, paddingBottom: 2 },
-  sectionDivider: { height: StyleSheet.hairlineWidth, marginVertical: space.md, backgroundColor: "transparent" },
   searchWrap: { paddingHorizontal: space.gutter, paddingBottom: space.sm },
   search: {
     borderWidth: StyleSheet.hairlineWidth,

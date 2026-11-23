@@ -20,13 +20,12 @@ import type {
 import { createTranscriptAccumulator } from "@letta-ai/letta-agent-sdk/client";
 
 import { toImageContent, type Attachment } from "./attachments";
-import type { ComputerSelectorField, Profile } from "../profiles/profiles";
-import { getConversationModel, isAuthError, listComputers, listConversationMessages, listConversationRuns, sdkClient, updateConversationModel } from "./api";
-import { ExternalTranscriptStore } from "./ExternalTranscriptStore";
-import { mergeTranscript } from "@angus/letta-client-core";
+import type { Profile } from "../profiles/profiles";
+import { getConversationModel, isAuthError, listConversationMessages, sdkClient } from "./api";
 import { emptyChat, type ApprovalRequest, type ChatSnapshot, type PermissionMode, type ToolStatus, type TranscriptItem } from "./model";
 import { patch } from "./mockSession";
-
+import { contentToText, formatToolInput } from "./toolText";
+import { newestTextKey, projectRows, type ProjectionState } from "./transcriptProjection";
 
 export type SnapshotListener = (snapshot: ChatSnapshot) => void;
 
@@ -83,16 +82,9 @@ export function subscribeConversationActivity(listener: () => void): () => void 
   return () => activityListeners.delete(listener);
 }
 
-/** A sent run that produces no local stream traffic within this window is
- * considered to be executing on another listener (bound harness) — the
- * session switches to tail-chase reconciliation for its content. */
-const LOCAL_RUN_SILENCE_MS = 15_000;
-
 export class ChatSession {
   private conn: { profile: Profile; secret: string };
-  private envOverride: { selector: ComputerSelectorField | null | undefined };
   private conversationId: string;
-  private agentId: string;
   private session: LettaCodeSession | null = null;
   private snapshot: ChatSnapshot;
   private listeners = new Set<SnapshotListener>();
@@ -107,20 +99,12 @@ export class ChatSession {
    */
   private accumulator: TranscriptAccumulator = createTranscriptAccumulator();
   /**
-   * Rows no server message can produce (an echo still in flight, an error).
-   * Each carries placement anchors for echoMerge: a date anchor (newest
-   * store record at send time) and, when live stream rows were visible, an
-   * identity anchor to the newest of them — the store lags REST persistence
-   * by seconds, so the date anchor alone let a second send stamp a stale
-   * position and render beside the first message instead of after the
-   * visible reply (the message-ordering bug).
+   * Rows no server message can produce (an echo still in flight, an error),
+   * each anchored to the number of accumulator rows that existed when it was
+   * created — so it renders where it happened instead of floating to the end
+   * once the reply streams in.
    */
-  private localRows: {
-    afterDate: string | null;
-    anchorOtid?: string;
-    anchorUuid?: string;
-    item: TranscriptItem;
-  }[] = [];
+  private localRows: { anchor: number; item: TranscriptItem }[] = [];
   /** otids of echoes still awaiting their persisted counterpart. */
   private echoOtids = new Set<string>();
   /** Reasoning think time, keyed by accumulator row key. */
@@ -139,15 +123,6 @@ export class ChatSession {
   private counter = 0;
   /** Attachments behind pending local echoes, so retry re-sends the images too. */
   private pendingAttachments = new Map<string, Attachment[]>();
-  /**
-   * Set when we're re-applying a saved/default permission mode. While set,
-   * applyDeviceStatus won't clobber permissionMode with the server's stale
-   * value — the restore pushes our mode to the server, and the flag clears
-   * once the server confirms it back.
-   */
-  private permRestoreInFlight = false;
-  /** Correlation tag for [PERM] diagnostic logs (which session instance logged). */
-  private readonly permLogTag: string = Math.random().toString(36).slice(2, 6);
   private approvalResolvers = new Map<
     string,
     (response: { behavior: "allow" } | { behavior: "deny"; message: string }) => void
@@ -155,125 +130,9 @@ export class ChatSession {
   /** Resolved approvals waiting for post-decision stream traffic. */
   private activityWaiters = new Set<{ resolve: () => void; reject: (error: Error) => void }>();
 
-  // --- Notification hooks (adapted from KMP client ChatScreen.kt) ---
-  /** True when the chat screen is visible — notifications fire only when off-screen. */
-  isScreenVisible = false;
-
-  /**
-   * True while a turn started FROM THIS APP is still executing. Read by the
-   * background-polling registry: MOBILE_ONLY notifications must fire for
-   * exactly these turns, and the native poller can only see server state —
-   * this flag tells it which conversations have a local run in flight.
-   */
-  hasLocalRunInFlight(): boolean {
-    return this.localRunInFlight;
-  }
-
-  /**
-   * Settle a stream_lost local turn with a definitive outcome. Exactly-once:
-   * clears the pending settlement FIRST, then fires onTurnCompleted. Shared
-   * by every settling signal (loop_status, definitive result, REST tail).
-   * `success: null` means the run was observed terminal on REST without a
-   * pass/fail distinction — treated as inconclusive, same as the old
-   * stream_lost notification, but now fired only once the outcome is KNOWN.
-   */
-  private settleLocalOutcome(success: boolean | null): void {
-    if (!this.pendingLocalSettlement) return;
-    this.pendingLocalSettlement = null;
-    if (this.onTurnCompleted) this.onTurnCompleted(success !== false);
-  }
-  /** Fired when a run started from THIS app completes (success or failure). */
-  onTurnCompleted: ((success: boolean) => void) | null = null;
-  /**
-   * Fired the moment a local send dispatches (before any await). Delivery
-   * ownership for MOBILE_ONLY notifications must be handed to the native
-   * poller AT SEND TIME — the chat screen may unmount (user leaves the
-   * conversation) while the run is still in flight, and with it dies every
-   * JS-side callback that would have posted the notification.
-   */
-  onLocalRunStarted: (() => void) | null = null;
-  /** Fired when a run started from ANOTHER client completes. */
-  onExternalRunCompleted: ((success: boolean) => void) | null = null;
-  /** True while an externally-initiated run is streaming into this session.
-   *  The server never sends a `result` for runs this client didn't start —
-   *  external completion is tracked via loop_status transitions instead. */
-  private externalRunActive = false;
-  /**
-   * Resolves when the attach-time permission restore settles (applied or
-   * failed). send() awaits this: a first message fired before the restore
-   * lands executes in the device's PREVIOUS mode — the exact race that had
-   * "unrestricted" turns hitting approval walls (UI showed unrestricted
-   * instantly via snapshot-restore, but the server device was still standard).
-   */
-  private permRestoreSettled: Promise<void> = Promise.resolve();
-  private externalRunSawError = false;
-  /**
-   * While an external run is active, the transcript reconciles over REST on a
-   * cadence: the relay does not fan out other clients' events (no deltas,
-   * loop_status only), so without this a run started on the desktop never
-   * streams into an open mobile chat. rebase() is safe mid-run (keyed rows),
-   * and the same loop unwedges the reopen-mid-run case where the fresh
-   * session's stream queues behind the busy run and delivers nothing.
-   */
-  private reconcileTimer: ReturnType<typeof setInterval> | null = null;
-  private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
-  /** Date of the newest message the transcript holds — tail-merge high-water mark. */
-  private lastTailDate: string | null = null;
-  /** Newest terminal run id seen by the tail sweep — null until first sweep. */
-  private lastSeenRunId: string | null = null;
-  /**
-   * Date-ordered store of external-run content (see ExternalTranscriptStore).
-   * Order is a property of message dates, not fetch arrival — the accumulator
-   * keeps only live local-stream reconciliation.
-   */
-  private externalStore = new ExternalTranscriptStore();
-  /**
-   * Row keys created by the LOCAL stream since the last hydrate — the only
-   * accumulator rows that may render as "live" in the projection. Rebased
-   * history rows are excluded by construction: external content renders from
-   * the date-ordered store, and rows whose server identity never matches a
-   * REST message id would otherwise leak into the live tail forever (the
-   * sticky "ran N tools" group).
-   */
-  private liveStreamKeys = new Set<string>();
-  /**
-   * Last time the LOCAL stream delivered anything. A send whose run executes
-   * on ANOTHER listener (the conversation's bound harness) streams nothing
-   * here — localRunInFlight would stick true forever (no result frame ever
-   * arrives), keeping the heartbeat off and the response invisible. The
-   * heartbeat clears the flag after LOCAL_RUN_SILENCE of no local traffic.
-   */
-  private lastLocalStreamAt = 0;
-  // --- Background external-run polling ---
-  // The relay does not fan out cross-client events (no deltas, loop_status,
-  // or result reach this session for runs started elsewhere), so while the
-  // app is backgrounded with notifications on, the conversation's runs are
-  // polled via REST to detect external-run completion.
-  /** Fired when sending a user message fails (e.g. socket closed) — the
-   *  bubble is marked "Not sent · Tap to retry". */
-  onSendFailed: ((reason: string) => void) | null = null;
-  /** True while a locally-initiated run is in flight (distinguishes local vs external). */
-  private localRunInFlight = false;
-  /**
-   * A local turn whose stream died mid-run (stream_lost): the outcome is
-   * UNKNOWN and the turn is NOT complete. Settling signals — loop_status
-   * returning to IDLE on a reconnected stream, a definitive (non-stream_lost)
-   * result frame, or the REST tail reconcile observing the run terminal —
-   * fire onTurnCompleted exactly once. Delivery ownership (the armed
-   * MOBILE_ONLY one-shot) stays with the native poller until then: retiring
-   * on the loss itself would leave a server-completing run unnotified.
-   */
-  private pendingLocalSettlement: { runIds: string[] } | null = null;
-
-  private constructor(conn: { profile: Profile; secret: string }, conversationId: string, agentId: string) {
+  private constructor(conn: { profile: Profile; secret: string }, conversationId: string) {
     this.conn = conn;
-    // Per-conversation environment override (see conversationEnv.ts):
-    // undefined = inherit profile.computerSelector; null = sandbox;
-    // selector = specific computer.
-    this.envOverride = { selector: undefined };
-    // (overwritten by ChatSession.open when a per-conversation env exists)
     this.conversationId = conversationId;
-    this.agentId = agentId;
     this.snapshot = { ...emptyChat, hydrating: true };
   }
 
@@ -283,106 +142,23 @@ export class ChatSession {
    * a cloud session provisions a sandbox, which is too heavy to pay for just
    * reading a conversation (see SDK-FEEDBACK.md #3).
    */
-  static open(
-    conn: { profile: Profile; secret: string },
-    conversationId: string,
-    agentId: string,
-    envOverride?: { selector: ComputerSelectorField | null | undefined },
-  ): ChatSession {
-    const chat = new ChatSession(conn, conversationId, agentId);
-    if (envOverride) chat.envOverride = envOverride;
+  static open(conn: { profile: Profile; secret: string }, conversationId: string): ChatSession {
+    const chat = new ChatSession(conn, conversationId);
     void chat.hydrate();
-    // Eagerly restore the saved permission mode into the snapshot so the chip
-    // shows the right value even before the SDK session is created (lazy, on
-    // first send). Without this, opening a conversation shows "Standard" until
-    // the user sends a message — the saved mode is invisible.
-    void chat.restorePermissionModeIntoSnapshot();
     return chat;
   }
 
-  /**
-   * Resolve a stored device id to its current online connection lease.
-   * Tri-state: a lease when the device is online, null when the listing
-   * succeeded and the device is genuinely absent (offline), and "unknown"
-   * when the listing itself failed (network blip) — callers must not report
-   * "offline" on a failed lookup, nor silently route on a stale lease.
-   */
-  private async resolveComputerLease(
-    deviceId: string,
-  ): Promise<{ lease: string | null; known: boolean }> {
-    try {
-      const computers = await listComputers({ profile: this.conn.profile, secret: this.conn.secret });
-      return { lease: computers.find((c) => c.deviceId === deviceId)?.connectionId ?? null, known: true };
-    } catch {
-      return { lease: null, known: false };
-    }
-  }
-
   /** Create the SDK session on demand and start consuming its stream. */
-  private async ensureSession(): Promise<LettaCodeSession> {
+  private ensureSession(): LettaCodeSession {
     if (this.session) return this.session;
     const client = sdkClient(this.conn);
-    // Cloud sessions route to the profile's selected computer when one is
-    // set; otherwise the SDK provisions a managed sandbox (its default).
-    // The stored selector is a DEVICE id (stable across remote restarts) —
-    // resolve it to the device's CURRENT connection lease at attach time.
-    // Legacy profiles may still hold a raw connectionId lease (pre-deviceId
-    // format); those pass through as-is.
-    // Per-conversation override wins: undefined inherits the profile value,
-    // null forces the cloud sandbox, a selector routes to that computer.
-    const raw =
-      this.envOverride.selector === undefined
-        ? this.conn.profile.computerSelector
-        : this.envOverride.selector;
-    let computer: { connectionId: string } | undefined;
-    if (!raw) {
-      computer = undefined;
-    } else if (typeof raw === "object" && "deviceId" in raw) {
-      // Preferred: resolve the stable device id to its CURRENT lease.
-      // - Listing succeeded + lease found → route to it.
-      // - Listing succeeded + no lease → device genuinely offline. The
-      //   stored lease is stale by definition (the listing is authoritative
-      //   and doesn't have it) — fail loudly rather than silently routing
-      //   to the sandbox (tools would run in the wrong environment while
-      //   the chip claims the device).
-      // - Listing failed (network blip) → fall back to the stored lease;
-      //   if none, fail with a transient-lookup message, not "offline".
-      const storedLease = "connectionId" in raw ? String(raw.connectionId) : undefined;
-      const { lease, known } = await this.resolveComputerLease(String(raw.deviceId));
-      if (known && !lease) {
-        throw new Error(
-          `Environment offline: no live connection for device ${raw.deviceId.slice(0, 8)}. ` +
-            "Pick another environment for this conversation.",
-        );
-      }
-      const resolved = lease ?? storedLease ?? null;
-      if (!resolved) {
-        throw new Error(
-          `Couldn't reach the environment list to find device ${raw.deviceId.slice(0, 8)}. ` +
-            "Check your connection, or pick another environment.",
-        );
-      }
-      computer = { connectionId: resolved };
-    } else if (raw && typeof raw === "object" && "connectionId" in raw) {
-      computer = { connectionId: raw.connectionId };
-    }
-    // Permission mode AT session creation (atomic — no race window): the
-    // post-attach changeDeviceState restore raced sends and could bind to a
-    // different device lease than the run's, leaving turns executing in
-    // standard mode with approval walls the user believed were off
-    // ("unrestricted" bug: intermittent prompts despite the setting).
-    // AsyncStorage reads are cheap; a failed read just means the server-side
-    // default stands until the post-attach restore lands (unchanged behavior).
-    const initialPerm = await resolveEffectivePermission(
-      this.conversationId,
-      this.agentId,
-      this.conn.profile.id,
-    ).catch(() => undefined);
+    // Cloud sessions execute in an SDK-managed sandbox (the SDK default).
+    // TODO(sdk) BUG: routing to an online environment via
+    // resumeSession(id, { environment }) fails against production — cloud-api
+    // closes the status socket with 1013 "Listener connection unavailable"
+    // when the SDK sends runtime_start, even with the listener online (see
+    // SDK-FEEDBACK.md). Re-enable pickCloudEnvironment() once fixed.
     this.session = client.resumeSession(this.conversationId, {
-      ...(computer ? { computer } : {}),
-      ...(initialPerm && isConcretePerm(initialPerm)
-        ? { permissionMode: toSdkPermissionMode(initialPerm) }
-        : {}),
       // Tool approvals surface as an ApprovalRequest in the snapshot; the
       // ApprovalCard resolves it via resolveApproval(). The run stays in
       // awaiting_approval until the user decides.
@@ -397,37 +173,8 @@ export class ChatSession {
     // concurrent clients, so nothing here contends for a socket.
     void this.consume();
     this.watchDeviceStatus(this.session);
-    this.startHeartbeat();
     return this.session;
   }
-
-  /**
-   * Attach the live session before any local send: initializes the transport
-   * (getDeviceStatus resolves after initialize) so external run traffic —
-   * and its completion notifications — reach the app while the chat is open
-   * but the user hasn't sent anything from this device yet.
-   */
-  warmup(): void {
-    // ensureSession can throw (e.g. the selected environment's device is
-    // offline) — swallow the rejection but record it in the snapshot so the
-    // header doesn't claim "Connected" while every send is about to fail.
-    // The full error surfaces with a failed-bubble + error row when the
-    // user actually sends, which is the right moment.
-    void this.ensureSession().catch(() => {
-      // No error field on the snapshot — the offline phase is the visible
-      // hint; the full message surfaces on the first send attempt.
-      this.commit(patch(this.snapshot, { connection: "offline", hydrating: false }));
-    });
-    void this.session?.getDeviceStatus().catch(() => {
-      // Connection state already surfaces through the session's own paths.
-    });
-  }
-
-  /**
-   * Background run polling lives in the native Kotlin service
-   * (modules/background-poll) — JS timers never fire in backgrounded RN
-   * contexts. See src/lib/backgroundPolling.ts for the root lifecycle.
-   */
 
   subscribe(listener: SnapshotListener): () => void {
     this.listeners.add(listener);
@@ -440,18 +187,6 @@ export class ChatSession {
   }
 
   async send(text: string, attachments: Attachment[] = []): Promise<void> {
-    // Wait for the attach-time permission restore: sending before it lands
-    // executes in the device's previous mode (approval walls on turns the
-    // user believes are unrestricted). Restore is one AsyncStorage read +
-    // one API call — the wait is imperceptible in practice.
-    if (this.permRestoreInFlight) {
-      console.log(`[PERM] ${this.permLogTag} SEND-WAIT ${this.conversationId.slice(-8)} (send gated on restore in flight)`);
-    }
-    await this.permRestoreSettled;
-    if (this.closed) {
-      console.log(`[SEND] ${this.permLogTag} ${this.conversationId.slice(-8)} ABORT — session closed before send (leave-screen race) t=${Date.now()}`);
-      return;
-    }
     // Stamp the echo with the otid we hand to send() (SDK 0.7.0,
     // letta-agent-sdk#273): the persisted user message comes back under the same
     // otid, so the accumulator keys it to this row and the echo retires by
@@ -471,18 +206,10 @@ export class ChatSession {
     // The turn starts when the user sends; loop_status and the device's own
     // status stay authoritative from here.
     if (this.snapshot.run === "idle") this.commit(patch(this.snapshot, { run: "running" }));
-    this.localRunInFlight = true;
-    // A new send supersedes any unsettled stream_lost turn from before —
-    // its onTurnCompleted (if the poller hasn't retired delivery already)
-    // settles inconclusively so the new turn's callback is the live one.
-    if (this.pendingLocalSettlement) this.settleLocalOutcome(null);
-    this.lastLocalStreamAt = Date.now();
-    if (this.onLocalRunStarted) this.onLocalRunStarted();
-    console.log(`[SEND] ${this.permLogTag} ${this.conversationId.slice(-8)} SDK-DISPATCH otid=${otid.slice(-8)} t=${Date.now()}`);
     try {
       // The SDK takes either a string or a multimodal content array; images
       // lead so the model reads them as context for the instruction.
-      await (await this.ensureSession()).send(
+      await this.ensureSession().send(
         attachments.length > 0
           ? [...toImageContent(attachments), ...(text ? [{ type: "text" as const, text }] : [])]
           : text,
@@ -494,20 +221,16 @@ export class ChatSession {
       // Fully handled here (no re-throw): the failed bubble + error row ARE
       // the error report, and composer call sites fire-and-forget.
       this.markEcho(otid, { failed: true });
-      const reason = e instanceof Error ? e.message : "Send failed.";
-      console.log(`[SEND] ${this.permLogTag} ${this.conversationId.slice(-8)} FAILED otid=${otid.slice(-8)} reason=${reason.slice(0, 80)} t=${Date.now()}`);
       this.commit(
         this.appendError(
           patch(this.project(this.snapshot), { run: "idle" }),
-          reason,
+          e instanceof Error ? e.message : "Send failed.",
         ),
       );
-      if (this.onSendFailed) this.onSendFailed(reason);
       return;
     }
     this.pendingAttachments.delete(otid);
     this.markEcho(otid, { pending: false });
-    console.log(`[SEND] ${this.permLogTag} ${this.conversationId.slice(-8)} ACK otid=${otid.slice(-8)} t=${Date.now()}`);
     this.commit(this.project(this.snapshot));
   }
 
@@ -550,14 +273,6 @@ export class ChatSession {
     // and link itself to its tool row.
     context?: CanUseToolContext,
   ): Promise<{ behavior: "allow"; updatedPermissions?: unknown[] } | { behavior: "deny"; message: string }> {
-    // Approvals from OTHER clients' runs auto-allow: this device's prompt
-    // must not gate a run it didn't start — the initiating client's own
-    // permission mode governs its runs. Without this, an open app on the
-    // conversation hijacks every other client's tool calls into a phone
-    // approval prompt (and an unattended prompt denies them on timeout).
-    if (!this.localRunInFlight) {
-      return Promise.resolve({ behavior: "allow" as const });
-    }
     const requestId = context?.requestId ?? this.id("approval");
     const request: ApprovalRequest = {
       requestId,
@@ -713,28 +428,15 @@ export class ChatSession {
 
   /** Change the conversation model/effort through the session (first-class SDK API). */
   async setModel(model: string, reasoningEffort?: string): Promise<void> {
-    if (reasoningEffort) {
-      await (await this.ensureSession()).updateModel({
-        modelHandle: model,
-        reasoningEffort: reasoningEffort as never,
-      });
-      return;
-    }
-    // No effort tier: the session protocol's updateModel payload can't carry a
-    // null effort ({model_id?, model_handle?} only), so a model-only update
-    // would leave the previous tier on the record. Clear it through the same
-    // REST path getModelInfo uses (verified Sept 24: explicit null sticks).
-    await updateConversationModel(this.conn, this.conversationId, { model, reasoningEffort: null });
+    await this.ensureSession().updateModel({
+      modelHandle: model,
+      ...(reasoningEffort ? { reasoningEffort: reasoningEffort as never } : {}),
+    });
   }
 
   /** Change the runtime permission mode (SDK 0.3.0 #208 write, 0.3.1 #212 read). */
-  async setPermissionMode(mode: PermissionMode, reason = "unspecified"): Promise<void> {
-    console.log(`[PERM] ${this.permLogTag} SET ${this.conversationId.slice(-8)} -> ${mode} (from ${this.snapshot.device?.permissionMode ?? "none"}) reason=${reason} t=${Date.now()}`);
-    this.permRestoreInFlight = true;
-    // Safety: if the server never confirms our mode (e.g. silent failure),
-    // clear the flag after 5s so device status updates resume normally.
-    setTimeout(() => { this.permRestoreInFlight = false; }, 5000);
-    await (await this.ensureSession()).changeDeviceState({ permissionMode: mode });
+  async setPermissionMode(mode: PermissionMode): Promise<void> {
+    await this.ensureSession().changeDeviceState({ permissionMode: mode });
     // The authoritative value lands via the next device-status update; show
     // the pending value immediately so the sheet feels responsive.
     this.commit(
@@ -746,109 +448,14 @@ export class ChatSession {
         },
       }),
     );
-    // Persist per-conversation so reopening restores the user's choice.
-    void saveConversationPerm(this.conversationId, mode).catch(() => {});
-  }
-
-  /**
-   * Set a cascade permission value (concrete or inheritance marker) at the
-   * conversation level. Concrete values are pushed to the server immediately.
-   * Inheritance markers are saved to AsyncStorage and the resolved concrete
-   * mode is pushed instead.
-   */
-  async setCascadePermission(mode: PermissionCascadeValue): Promise<void> {
-    // Save the user's selection (concrete or marker) per-conversation.
-    await saveConversationPerm(this.conversationId, mode);
-    if (isConcretePerm(mode)) {
-      await this.setPermissionMode(toSdkPermissionMode(mode), "cascade-concrete");
-    } else {
-      // Resolve the effective mode and push that to the server.
-      const resolved = await resolveEffectivePermission(
-        this.conversationId,
-        this.agentId,
-        this.conn.profile.id,
-      );
-      await this.setPermissionMode(toSdkPermissionMode(resolved), "cascade-resolved");
-    }
   }
 
   /** Mirror live device status (permission mode, cwd) into the snapshot. */
   private watchDeviceStatus(session: LettaCodeSession): void {
-    session.onDeviceStatus((status) => {
-      this.commit(this.applyDeviceStatus(this.snapshot, status));
-      // Reopen-mid-run: a fresh session's stream can wedge behind the busy
-      // run (second-subscriber contention) — if the device says a run is
-      // processing and we didn't start it, reconcile over REST until idle.
-      // Settlement window: our recovering run's device status must not
-      // start the external reconcile as if it were another client's run.
-      if (!this.localRunInFlight && !this.pendingLocalSettlement && status.isProcessing) this.startExternalReconcile();
-      if (!status.isProcessing && !this.externalRunActive) this.stopExternalReconcile();
-    });
+    session.onDeviceStatus((status) => this.commit(this.applyDeviceStatus(this.snapshot, status)));
     void session.getDeviceStatus().catch(() => {
       // Best-effort: some transports may not replay status until a turn runs.
     });
-    // Restore the user's saved permission mode for this conversation, or the
-    // app-wide default. Cloud sandboxes start at "standard" every time; this
-    // re-applies the user's choice so it survives across reopens.
-    console.log(`[PERM] ${this.permLogTag} ATTACH ${this.conversationId.slice(-8)} — session attached, restoring saved mode`);
-    void this.restorePermissionMode();
-  }
-
-  /**
-   * Read the saved permission mode from AsyncStorage and set it in the snapshot
-   * immediately — before any SDK session exists. This makes the chip show the
-   * right value on conversation open without requiring a send first.
-   */
-  private async restorePermissionModeIntoSnapshot(): Promise<void> {
-    try {
-      const resolved = await resolveEffectivePermission(
-        this.conversationId,
-        this.agentId,
-        this.conn.profile.id,
-      );
-      const mode = toSdkPermissionMode(resolved);
-      console.log(`[PERM] ${this.permLogTag} SNAPSHOT-RESTORE ${this.conversationId.slice(-8)} mode=${mode} (display only, no server push)`);
-      this.commit(
-        patch(this.snapshot, {
-          device: {
-            permissionMode: mode,
-            workingDirectory: this.snapshot.device?.workingDirectory ?? null,
-            memoryDirectory: this.snapshot.device?.memoryDirectory ?? null,
-          },
-        }),
-      );
-    } catch {
-      // Best-effort: if AsyncStorage fails the server default ("standard") stands.
-    }
-  }
-
-  /** Re-apply saved per-conversation permission mode, or the cascade default. */
-  private async restorePermissionMode(): Promise<void> {
-    // Set the guard BEFORE the async AsyncStorage read so onDeviceStatus can't
-    // clobber our restored mode while we're waiting for storage.
-    this.permRestoreInFlight = true;
-    this.permRestoreSettled = this.doRestorePermissionMode();
-    await this.permRestoreSettled;
-  }
-
-  private async doRestorePermissionMode(): Promise<void> {
-    console.log(`[PERM] ${this.permLogTag} RESTORE-START ${this.conversationId.slice(-8)} t=${Date.now()}`);
-    setTimeout(() => { this.permRestoreInFlight = false; }, 5000);
-    try {
-      const resolved = await resolveEffectivePermission(
-        this.conversationId,
-        this.agentId,
-        this.conn.profile.id,
-      );
-      // Only push to the server if the resolved mode is a concrete value
-      // (not an inheritance marker — those should have been resolved already).
-      console.log(`[PERM] ${this.permLogTag} RESTORE ${this.conversationId.slice(-8)} resolved=${resolved} push=${isConcretePerm(resolved)}`);
-      if (isConcretePerm(resolved)) {
-        await this.setPermissionMode(toSdkPermissionMode(resolved), "restore-on-attach");
-      }
-    } catch {
-      // Best-effort: if AsyncStorage fails the server default ("standard") stands.
-    }
   }
 
   /**
@@ -857,127 +464,6 @@ export class ChatSession {
    * Without this a resume can leave the UI stuck ("Running" forever, stop
    * button frozen) after the run it remembers has long since finished.
    */
-  /**
-   * Incremental tail sync for open chats. The runs endpoint is fresh
-   * immediately; the messages endpoint lags writes by tens of seconds — so
-   * the heartbeat sweeps RUNS, and only when a new terminal run appears does
-   * it chase messages (retrying until the write becomes visible). Rows apply
-   * via applyHistoryMessage (keyed merge, no reorder) — a full rebase() here
-   * churned the transcript (the "history wiped" brick).
-   */
-  private async reconcileTailV2(): Promise<void> {
-    if (this.closed) return;
-    try {
-      const runs = await listConversationRuns(this.conn, this.conversationId, { limit: 3 });
-      const terminal = runs.find(
-        (r) => r.status === "completed" || r.status === "failed" || r.status === "cancelled",
-      );
-      if (!terminal) return;
-      if (this.lastSeenRunId === null) {
-        // First sweep after open: baseline without applying (hydrate covered it).
-        this.lastSeenRunId = terminal.id;
-        return;
-      }
-      if (terminal.id === this.lastSeenRunId) return;
-      const previousRunId = this.lastSeenRunId;
-      this.lastSeenRunId = terminal.id;
-      // Settling signal for a stream_lost local turn: REST observes the run
-      // terminal. If the held settlement names its runIds, match precisely;
-      // otherwise (SDK sent none) a NEW terminal run since the loss is the
-      // best available resolution — it fired after our send.
-      if (this.pendingLocalSettlement) {
-        const held = this.pendingLocalSettlement.runIds;
-        if (held.length === 0 || held.includes(terminal.id)) {
-          this.settleLocalOutcome(terminal.status === "completed" ? true : terminal.status === "failed" ? false : null);
-        }
-      }
-      // New run completed — chase messages until the write is visible. On
-      // failure, revert the marker so the next sweep re-chases: message
-      // indexing lag can exceed any fixed budget, and a consumed run id
-      // would strand the content until the next full hydrate.
-      let landed = false;
-      for (let attempt = 0; attempt < 20 && !landed; attempt++) {
-        if (this.closed) return;
-        landed = await this.applyTailMessages();
-        if (!landed) await new Promise((r) => setTimeout(r, 2_000));
-      }
-      if (!landed && !this.closed) {
-        this.lastSeenRunId = previousRunId;
-      }
-    } catch (e) {
-      console.log(`[TAIL] error: ${e instanceof Error ? e.message : String(e)}`);
-    }
-  }
-
-  /** Fetch newest page, apply rows newer than lastTailDate. True when rows landed. */
-  private async applyTailMessages(): Promise<boolean> {
-    const page = await this.fetchHistoryPage();
-    // listConversationMessages returns the page OLDEST-FIRST (it reverses
-    // internally). External content upserts into the date-ordered store —
-    // display order comes from message dates, never fetch arrival. A
-    // persisted user message matching a live echo is skipped: the echo
-    // already shows that text at its correct position; fresh opens rebuild
-    // from the full page anyway.
-    const messages = page.messages as Array<{ date?: string }>;
-    if (!messages.length) return false;
-    let newest = this.lastTailDate ?? "";
-    const fresh = messages.filter((m) => {
-      const d = m.date ?? "";
-      return d > newest;
-    });
-    const applicable = fresh.filter((m) => {
-      const otid = (m as { otid?: string }).otid;
-      return !(
-        (m as { message_type?: string }).message_type === "user_message" &&
-        otid !== undefined &&
-        this.echoOtids.has(otid)
-      );
-    });
-    const chN = this.externalStore.upsert(applicable as never);
-    const changed = chN > 0;
-    const newestDate = fresh.length ? (fresh[fresh.length - 1]!.date ?? "") : "";
-    if (newestDate > (this.lastTailDate ?? "")) this.lastTailDate = newestDate;
-    if (changed || fresh.length > 0) this.commit(this.project(this.snapshot));
-    return changed || fresh.length > 0;
-  }
-
-  /** Begin REST reconciliation while a run we don't own is in flight. */
-  private startExternalReconcile(): void {
-    if (this.reconcileTimer || this.closed) return;
-    this.reconcileTimer = setInterval(() => {
-      if (this.closed || this.localRunInFlight) return;
-      void this.reconcileTailV2();
-    }, 3_000);
-  }
-
-  /**
-   * Open-chat heartbeat: the relay delivers NO events for other clients' runs
-   * (no deltas, no loop_status, no device-status pushes), so a chat that is
-   * open-and-idle when a desktop run starts has no signal to trigger on. While
-   * the session is open and no local run is in flight, reconcile at a low
-   * cadence unconditionally; known-active external runs use the faster loop.
-   */
-  private startHeartbeat(): void {
-    if (this.heartbeatTimer || this.closed) return;
-    this.heartbeatTimer = setInterval(() => {
-      if (this.closed) return;
-      // A "local" run with no local stream traffic for LOCAL_RUN_SILENCE is
-      // executing on another listener (no fanout, no result frame here) —
-      // clear the flag so the tail chase can surface the response.
-      if (this.localRunInFlight && Date.now() - this.lastLocalStreamAt > LOCAL_RUN_SILENCE_MS) {
-        this.localRunInFlight = false;
-      }
-      if (this.localRunInFlight) return;
-      void this.reconcileTailV2();
-    }, 3_000);
-  }
-
-  private stopExternalReconcile(): void {
-    if (!this.reconcileTimer) return;
-    clearInterval(this.reconcileTimer);
-    this.reconcileTimer = null;
-  }
-
   private applyDeviceStatus(snapshot: ChatSnapshot, status: SessionDeviceStatus): ChatSnapshot {
     const pending = status.pendingControlRequests ?? [];
     // Approvals we still hold a resolver for stay as they are — those cards can
@@ -998,44 +484,9 @@ export class ChatSession {
         unresolvable: true,
       }));
     const approvals = [...answerable, ...orphans];
-    // If we're restoring a saved/default permission mode, don't let a stale
-    // server status clobber it — the changeDeviceState call is still in
-    // flight. Once the server confirms our mode, clear the flag.
-    const serverMode = status.permissionMode as PermissionMode;
-    const prevMode = snapshot.device?.permissionMode;
-    if (serverMode !== prevMode) {
-      console.log(`[PERM] ${this.permLogTag} OBSERVE ${this.conversationId.slice(-8)} server=${serverMode} prev=${prevMode ?? "none"} restoreInFlight=${this.permRestoreInFlight} local=${this.localRunInFlight} ext=${this.externalRunActive} t=${Date.now()}`);
-    }
-    // Log the resolution of any restore (did the server confirm our mode?)
-    if (this.permRestoreInFlight && serverMode === snapshot.device?.permissionMode && serverMode !== undefined) {
-      console.log(`[PERM] ${this.permLogTag} CONFIRM ${this.conversationId.slice(-8)} server=${serverMode} (restore acknowledged)`);
-    }
-    if (this.permRestoreInFlight) {
-      // Keep our restored value until the server echoes it back.
-      const ourMode = this.snapshot.device?.permissionMode;
-      if (ourMode && ourMode === serverMode) {
-        this.permRestoreInFlight = false;
-      }
-      return patch(snapshot, {
-        device: {
-          permissionMode: ourMode ?? serverMode,
-          workingDirectory: status.workingDirectory,
-          memoryDirectory: status.memoryDirectory,
-        },
-        approvals,
-        run:
-          snapshot.run === "aborting"
-            ? "aborting"
-            : approvals.length > 0
-              ? "awaiting_approval"
-              : status.isProcessing
-                ? "running"
-                : "idle",
-      });
-    }
     return patch(snapshot, {
       device: {
-        permissionMode: serverMode,
+        permissionMode: status.permissionMode as PermissionMode,
         workingDirectory: status.workingDirectory,
         // The path the executing harness actually resolved (SDK 0.5.1, #229) —
         // null on older servers that don't report it.
@@ -1123,17 +574,7 @@ export class ChatSession {
   }
 
   close(): void {
-    console.log(`[SEND] ${this.permLogTag} ${this.conversationId.slice(-8)} CLOSE t=${Date.now()}`);
     this.closed = true;
-    // An unsettled stream_lost turn dies with the session: its one-shot
-    // delivery stays with the native poller (the leave-screen case), which
-    // owns notification from here regardless — nothing left to settle here.
-    this.pendingLocalSettlement = null;
-    this.stopExternalReconcile();
-    if (this.heartbeatTimer) {
-      clearInterval(this.heartbeatTimer);
-      this.heartbeatTimer = null;
-    }
     this.accumulator.reset();
     this.localRows = [];
     this.echoOtids.clear();
@@ -1193,19 +634,6 @@ export class ChatSession {
       // replay thresholds the page proves. Appending would double the transcript
       // on every foreground resume, which is exactly what it used to do.
       this.accumulator.rebase({ messages: page.messages as never }, { order: "asc" });
-      // The external store renders history; the accumulator's rebase stays
-      // for local-stream replay bookkeeping (aliases, thresholds).
-      const upN = this.externalStore.upsert(page.messages as never);
-      // History ownership transfers to the store at every hydrate: only
-      // stream rows arriving AFTER this point render from the accumulator.
-      this.liveStreamKeys.clear();
-      // Seed the tail high-water mark: listConversationMessages returns the
-      // page OLDEST-FIRST, so the LAST message carries the newest date.
-      {
-        const pm = page.messages as Array<{ date?: string }>;
-        const nd = pm.length ? pm[pm.length - 1]?.date : undefined;
-        if (nd && nd > (this.lastTailDate ?? "")) this.lastTailDate = nd;
-      }
       this.commit(
         this.project(patch(this.snapshot, { hydrating: false, hasMore: page.hasMore })),
       );
@@ -1252,11 +680,7 @@ export class ChatSession {
     try {
       const page = await this.fetchHistoryPage(this.nextBefore);
       this.nextBefore = page.nextBefore;
-      // The external store renders history — older pages must land there.
-      // (Rebase into the accumulator alone rendered nothing: live projection
-      // only shows local-stream rows, so backfill was invisible — the
-      // "can't scroll up" regression after the ExternalTranscriptStore move.)
-      this.externalStore.upsert(page.messages as never);
+      // Backfilled rows order ahead of live-only rows inside the accumulator.
       this.accumulator.rebase({ messages: page.messages as never }, { order: "asc" });
       this.commit(
         this.project(patch(this.snapshot, { hasMore: page.hasMore, loadingOlder: false })),
@@ -1274,7 +698,7 @@ export class ChatSession {
     // the first paint stays cheap and older pages arrive on scroll.
     const limit = 50;
     if (this.conn.profile.type === "remote") {
-      const result = await (await this.ensureSession()).listMessages({ limit, ...(before ? { before } : {}) });
+      const result = await this.ensureSession().listMessages({ limit, ...(before ? { before } : {}) });
       const messages = result.messages.slice().reverse();
       const oldestId = (messages[0] as { id?: string } | undefined)?.id ?? null;
       const full = result.messages.length >= limit;
@@ -1330,24 +754,7 @@ export class ChatSession {
    * commits immediately — interactivity must never wait on the buffer.
    */
   private ingest(message: SDKMessage): void {
-    this.lastLocalStreamAt = Date.now();
     this.settleActivityWaiters();
-    // External run tracking: deltas arriving with no local turn in flight
-    // belong to a run another client started. `result` frames are only
-    // synthesized for locally-sent turns, so completion is detected from the
-    // server's loop_status broadcast (IDLE) in reduce(). Exception: while a
-    // stream_lost settlement is pending, traffic on this session is most
-    // plausibly OUR run recovering (the SDK reconnects and replays) — those
-    // deltas must NOT flip externalRunActive, or loop_status IDLE would
-    // double-fire onExternalRunCompleted alongside settleLocalOutcome.
-    if (!this.localRunInFlight && !this.pendingLocalSettlement) {
-      if (message.type === "assistant" || message.type === "reasoning" || message.type === "tool_call" || message.type === "tool_result") {
-        this.externalRunActive = true;
-        this.startExternalReconcile();
-      } else if (message.type === "error") {
-        if (this.externalRunActive) this.externalRunSawError = true;
-      }
-    }
     if (message.type === "stream_event") {
       this.pendingStream.push(message);
       if (this.flushTimer) return;
@@ -1402,54 +809,30 @@ export class ChatSession {
       thinkSeconds: this.thinkSeconds,
       toolDurationMs: this.toolDurationMs,
     };
-    // External content renders from the date-ordered store. Accumulator rows
-    // the store already covers (rebased history, keyed by server uuid) are
-    // dropped from the live projection — only genuinely-live stream rows
-    // (a local run in flight) render from the accumulator.
-    const externalEntries = this.externalStore.itemsWithDatesRev();
+    const items = projectRows(rows, state);
 
-    // An echo retires the moment the store holds the persisted message under
-    // the same otid — identity, not a guess about matching text.
-    const storeUserOtids = this.externalStore.userOtids();
+    // An echo retires the moment the accumulator reports the persisted message
+    // under the same otid — identity, not a guess about matching text.
+    const seenOtids = new Set(rows.map((row) => row.otid).filter(Boolean) as string[]);
     this.localRows = this.localRows.filter(
-      ({ item }) => !(item.kind === "user" && this.echoOtids.has(item.id) && storeUserOtids.has(item.id)),
+      ({ item }) => !(item.kind === "user" && this.echoOtids.has(item.id) && seenOtids.has(item.id)),
     );
 
-    // Live rows retire once the store holds the same message uuid — the
-    // stream row (rendered at the newest edge) and the store record (rendered
-    // at its date position) are the same content; keeping both double-renders
-    // the reply once reconcile lands it.
-    const storeUuids = this.externalStore.uuids();
-    const liveItems = projectRows(rows, state)
-      .filter((it) => this.liveStreamKeys.has(it.id))
-      .filter((it) => {
-        const row = rows.find((r) => r.key === it.id);
-        return !(row?.uuid && storeUuids.has(row.uuid));
-      });
-
-    const oldestFirst = mergeTranscript(
-      externalEntries,
-      this.localRows,
-      liveItems.map((it) => {
-        const row = rows.find((r) => r.key === it.id);
-        return {
-          item: it,
-          ...(row?.uuid ? { uuid: row.uuid } : {}),
-          ...(row?.otid ? { otid: row.otid } : {}),
-        };
-      }),
-    );
-    if (this.localRows.length > 1) {
-      const placement = this.localRows.map(
-        (e) =>
-          `${e.afterDate?.slice(11, 19) ?? "null"}/${e.anchorOtid?.slice(-6) ?? e.anchorUuid?.slice(-6) ?? "none"}:${("text" in e.item ? e.item.text : e.item.id).slice(0, 12)}`,
-      );
-      console.log(`[ORDER] ${this.permLogTag} ${this.conversationId.slice(-8)} echoes=${placement.join(" | ")}`);
+    const transcript: TranscriptItem[] = [];
+    let placed = 0;
+    for (let i = 0; i <= items.length; i++) {
+      for (const { anchor, item } of this.localRows) {
+        if (anchor === i) transcript.push(item);
+      }
+      if (i < items.length) transcript.push(items[i]!);
+      placed = i;
     }
-    // The transcript ships OLDEST-FIRST: chat.tsx's groupToolRuns().reverse()
-    // produces the newest-first array the inverted FlatList renders.
-
-    return patch(snapshot, { transcript: oldestFirst });
+    // Anchors past the current row count (rows the accumulator later dropped)
+    // still belong at the end rather than disappearing.
+    for (const { anchor, item } of this.localRows) {
+      if (anchor > placed) transcript.push(item);
+    }
+    return patch(snapshot, { transcript });
   }
 
   /**
@@ -1491,45 +874,13 @@ export class ChatSession {
 
   /** Feed a message to the accumulator, then rebuild the transcript from it. */
   private absorb(snapshot: ChatSnapshot, message: SDKMessage): ChatSnapshot {
-    const before = new Set(this.accumulator.rows().map((r) => r.key));
     this.accumulator.apply(message);
-    for (const row of this.accumulator.rows()) {
-      if (!before.has(row.key)) this.liveStreamKeys.add(row.key);
-    }
     return this.project(snapshot);
   }
 
-  /**
-   * Add an app-only row (echo, error) positioned after the newest external
-   * record at creation time — date-ordered placement, no row-count anchors
-   * (anchors went stale whenever rows inserted past them).
-   */
+  /** Add an app-only row (echo, error) anchored at the current live edge. */
   private appendLocal(snapshot: ChatSnapshot, item: TranscriptItem): ChatSnapshot {
-    const stamp = this.externalStore.maxDate();
-    // Identity anchor: the newest live stream row visible NOW. The store's
-    // newest date can lag the visible reply by seconds (REST persistence
-    // lag), so anchoring by date alone let consecutive sends stamp identical
-    // stale positions — the second echo rendered beside the first message
-    // instead of after the reply. Anchoring to the newest live row's
-    // otid/uuid pins the echo after everything the user can already see.
-    const liveRows = this.accumulator.rows().filter((r) => this.liveStreamKeys.has(r.key));
-    const newestLive = liveRows[liveRows.length - 1];
-    const anchorOtid = newestLive?.otid ?? undefined;
-    const anchorUuid = newestLive?.uuid ?? undefined;
-    if (item.kind === "user") {
-      console.log(
-        `[ORDER] ${this.permLogTag} ${this.conversationId.slice(-8)} ECHO stamp=${stamp?.slice(11, 19) ?? "null"} anchor=${anchorOtid ?? anchorUuid ?? "none"} text=${"text" in item ? item.text.slice(0, 15) : "?"}`,
-      );
-    }
-    this.localRows = [
-      ...this.localRows,
-      {
-        afterDate: stamp,
-        ...(anchorOtid ? { anchorOtid } : {}),
-        ...(anchorUuid ? { anchorUuid } : {}),
-        item,
-      },
-    ];
+    this.localRows = [...this.localRows, { anchor: this.accumulator.rows().length, item }];
     return this.project(snapshot);
   }
 
@@ -1545,7 +896,6 @@ export class ChatSession {
     });
   }
 
-  /** Contract-test seam: drives one SDK message through the reducer. */
   reduceForTest(snapshot: ChatSnapshot, message: SDKMessage): ChatSnapshot {
     return this.reduce(snapshot, message);
   }
@@ -1586,30 +936,6 @@ export class ChatSession {
         // what used to make a freshly-opened chat show a phantom turn, since
         // opening one reports WAITING_ON_INPUT.
         const status = message.status.toUpperCase();
-        // Settling signal for a stream_lost local turn: the loop itself
-        // reports no active runs — the outcome (completed server-side or
-        // halted) is now known enough to fire onTurnCompleted. Inconclusive
-        // (null): loop_status says the loop parked, not whether the run's
-        // content succeeded — the REST tail already landed whatever exists.
-        if (status === "IDLE" && this.pendingLocalSettlement) {
-          this.settleLocalOutcome(null);
-        }
-        // External run completion: loop_status returning to IDLE after we saw
-        // another client's run traffic is the only terminal signal external
-        // runs produce on this session (no `result` frame for them). Skipped
-        // during a pending settlement (our own recovering run's traffic).
-        if (!this.localRunInFlight && !this.pendingLocalSettlement) {
-          if (!status.startsWith("WAITING") && status !== "IDLE") {
-            this.externalRunActive = true;
-            this.startExternalReconcile();
-          } else if (status === "IDLE" && this.externalRunActive) {
-            this.externalRunActive = false;
-            this.stopExternalReconcile();
-            const failed = this.externalRunSawError;
-            this.externalRunSawError = false;
-            if (this.onExternalRunCompleted) this.onExternalRunCompleted(!failed);
-          }
-        }
         if (status === "WAITING_ON_APPROVAL") {
           return this.project(patch(snapshot, { run: "awaiting_approval" }));
         }
@@ -1622,21 +948,31 @@ export class ChatSession {
       }
 
       case "result": {
-        // SDK 0.8.39 terminal doctrine (./terminal.ts): the result frame is
-        // the only authority on how the turn ended. stream_closed /
-        // recoverable results are transport loss — outcome unknown — so they
-        // settle WITHOUT an error row; the connection banner owns them.
-        const outcome = classifyResult(message);
+        // An aborted turn completes as a result with stopReason "interrupted"
+        // and no settled assistant message, so the row it left behind is the
+        // only place "Stopped" can be shown.
         const interrupted = !message.success || message.stopReason === "interrupted";
         this.interruptedKey = interrupted ? newestTextKey(this.accumulator.rows()) : null;
         const idle = this.project(patch(snapshot, { run: "idle" }));
+        if (message.success) return idle;
+        // Transport-class failures (stream_closed et al) are NOT application
+        // errors: the turn settles with the connection marked offline and no
+        // error row — the offline banner's Retry is the recovery surface.
+        const detail = message.errorDetail ?? message.error ?? "";
+        if (detail && isTransportError(detail)) {
+          return patch(idle, { connection: "offline" });
+        }
+        return this.appendError(idle, message.errorDetail ?? message.error ?? "The run failed.");
+      }
 
-        this.interruptedKey = newestTextKey(this.accumulator.rows());
-        if (outcome.kind === "stream_lost") {
-          // Transport loss mid-run (recoverable per the SDK): outcome
-          // unknown — surface via connection state, never as a failed run.
+      case "error": {
+        // Transport-class error frames (stream_closed et al) are connection
+        // loss mid-run: mark offline, no error row — the offline banner's
+        // Retry is the recovery surface. Genuine errors still render.
+        if (isTransportError(message.message || "")) {
           return patch(this.project(snapshot), { connection: "offline" });
         }
+        this.interruptedKey = newestTextKey(this.accumulator.rows());
         return this.appendError(
           this.project(snapshot),
           // Error events don't always carry a message (e.g. an

@@ -1,4 +1,3 @@
-import { Image } from "expo-image";
 /**
  * Conversations for one agent — live list with create, rename, and cursor
  * pagination (docs/design-doc.md §4.3). Cloud lists via REST, remote via
@@ -7,11 +6,8 @@ import { Image } from "expo-image";
 import type { BottomSheetModal } from "@gorhom/bottom-sheet";
 import { router, useFocusEffect, useLocalSearchParams } from "expo-router";
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
-import { ActivityIndicator, Alert, FlatList, RefreshControl, StyleSheet, TextInput, View } from "react-native";
-import AsyncStorage from "@react-native-async-storage/async-storage";
-import { loadPinned, pinnedConversationsKey, togglePinned } from "../lib/favorites";
+import { Alert, FlatList, RefreshControl, StyleSheet, TextInput, View } from "react-native";
 
-import { Dropdown } from "../components/ui/Dropdown";
 import { EmptyState } from "../components/ui/EmptyState";
 import { Header, Screen } from "../components/ui/Screen";
 import { Sheet } from "../components/ui/Sheet";
@@ -19,52 +15,21 @@ import { SkeletonList } from "../components/ui/Skeleton";
 import { StatusDot } from "../components/ui/StatusDot";
 import { Text } from "../components/ui/Text";
 import { Touchable } from "../components/ui/Touchable";
-import { ModelSheet } from "../components/chat/ModelSheet";
 import {
-  applyModelToConversations,
   canDeleteConversations,
   createConversation,
   deleteConversation,
-  fetchAgentProfilePicture,
-  fetchHiddenConversations,
-  fetchLastAssistantPreview,
-  fetchRunActivity,
-  listConversationMessages,
   listConversations,
-  listModels,
   renameConversation,
   type ConversationSummary,
-  type ModelOption,
 } from "../lib/letta/api";
 import {
   conversationActivity,
   subscribeConversationActivity,
   type ConversationActivity,
 } from "../lib/letta/ChatSession";
-
+import { getSecret } from "../lib/profiles/profiles";
 import { useProfiles } from "../lib/profiles/ProfilesContext";
-import {
-  NotificationMode,
-  labelWithResolution,
-  resolveMode,
-  loadAppDefault,
-  loadAgentSetting,
-  saveAgentSetting,
-  loadServerSetting,
-  resetAgentDownstreamNotifications,
-} from "../lib/notifications";
-import {
-  PermissionCascadeMode,
-  type PermissionCascadeValue,
-  permLabelWithResolution,
-  permissionDetail,
-  loadAppPermDefault,
-  loadAgentPerm,
-  saveAgentPerm,
-  loadServerPerm,
-  resolvePermission,
-  resetAgentDownstreamPermissions,
-} from "../lib/permissions";
 import { useTheme } from "../theme/ThemeProvider";
 import { radius, space } from "../theme/tokens";
 
@@ -87,7 +52,8 @@ function useActivity(conversationId: string): ConversationActivity | null {
   return useSyncExternalStore(subscribeConversationActivity, read);
 }
 
-
+function ConversationRow({ conversation, onPress, onLongPress }: {
+  conversation: ConversationSummary;
   onPress: () => void;
   onLongPress: () => void;
 }) {
@@ -95,7 +61,6 @@ function useActivity(conversationId: string): ConversationActivity | null {
   const activity = useActivity(conversation.id);
   const activityLabel =
     activity === "awaiting_approval" ? "needs approval" : activity === "running" ? "running" : null;
-  const inProgress = running || activity === "running";
   return (
     <Touchable
       accessibilityRole="button"
@@ -109,7 +74,12 @@ function useActivity(conversationId: string): ConversationActivity | null {
     >
       <View style={styles.rowInner}>
         <View style={styles.rowText}>
-
+          <Text role="bodyEm" numberOfLines={1}>
+            {conversation.title}
+          </Text>
+          <Text role="sub" ink={3}>
+            {activityLabel ?? relativeTime(conversation.lastMessageAt)}
+          </Text>
         </View>
         {activity ? (
           <StatusDot tone={activity === "awaiting_approval" ? "wait" : "run"} />
@@ -128,164 +98,24 @@ export default function ConversationsScreen() {
   const { activeProfile } = useProfiles();
 
   const [conversations, setConversations] = useState<ConversationSummary[] | null>(null);
-  const [previews, setPreviews] = useState<Record<string, string>>({});
-  const actionsSheetRef = useRef<BottomSheetModal>(null);
-  const [actionTarget, setActionTarget] = useState<ConversationSummary | null>(null);
-  const [runningConvs, setRunningConvs] = useState<Set<string>>(new Set());
-  const [pinned, setPinned] = useState<Set<string>>(new Set());
-  const [avatarUrl, setAvatarUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [hasMore, setHasMore] = useState(true);
   const [search, setSearch] = useState("");
-  const [chatMeta, setChatMeta] = useState<ChatMeta>({ pinned: [], readCursors: {} });
   const renameSheetRef = useRef<BottomSheetModal>(null);
   const [renaming, setRenaming] = useState<ConversationSummary | null>(null);
   const [draftTitle, setDraftTitle] = useState("");
 
-
-    try {
-      const secret = (await getSecret(activeProfile.id)) ?? "";
-      const convs = await listConversations({ profile: activeProfile, secret }, agentId, { limit: 100 });
-      const convIds = convs.map((c) => c.id);
-      await resetAgentDownstreamNotifications(convIds);
-      Alert.alert("Reset complete", `Cleared notification overrides for ${convIds.length} conversations on ${agentName}.`);
-    } catch (e) {
-      Alert.alert("Couldn't reset", e instanceof Error ? e.message : undefined);
-    }
-  };
-
-  const resetConvPermDownstream = async () => {
-    if (!activeProfile) return;
-    try {
-      const secret = (await getSecret(activeProfile.id)) ?? "";
-      const convs = await listConversations({ profile: activeProfile, secret }, agentId, { limit: 100 });
-      const convIds = convs.map((c) => c.id);
-      await resetAgentDownstreamPermissions(convIds);
-      Alert.alert("Reset complete", `Cleared permission overrides for ${convIds.length} conversations on ${agentName}.`);
-    } catch (e) {
-      Alert.alert("Couldn't reset", e instanceof Error ? e.message : undefined);
-    }
-  };
-
-  // Downstream model application — pick a model, then apply it to every
-  // conversation on this agent. The settings sheet is dismissed before the
-  // picker presents and re-presented when the picker closes (stacked-sheet
-  // minimize/restore is unreliable, so this flow is fully explicit).
-  const modelPickRef = useRef<BottomSheetModal>(null);
-  const [models, setModels] = useState<ModelOption[]>([]);
-  const [chosenModelHandle, setChosenModelHandle] = useState<string | null>(null);
-  const [applyingModel, setApplyingModel] = useState(false);
-  const [pickFromSettings, setPickFromSettings] = useState(false);
-  const chosenModelLabel = models.find((m) => m.handle === chosenModelHandle)?.label ?? null;
-
-  const openModelPick = () => {
-    if (!agentSettingsRef.current) return;
-    setPickFromSettings(true);
-    agentSettingsRef.current.dismiss();
-    modelPickRef.current?.present();
-  };
-
-  useEffect(() => {
-    if (!activeProfile) return;
-    void (async () => {
-      try {
-        const secret = (await getSecret(activeProfile.id)) ?? "";
-        setModels(await listModels({ profile: activeProfile, secret }));
-      } catch {
-        setModels([]);
-      }
-    })();
-  }, [activeProfile]);
-
-  const applyModelDownstream = async () => {
-    if (!activeProfile || !chosenModelHandle) return;
-    setApplyingModel(true);
-    try {
-      const secret = (await getSecret(activeProfile.id)) ?? "";
-      const convs = await listConversations({ profile: activeProfile, secret }, agentId, { limit: 100 });
-      const ids = convs.map((c) => c.id);
-      const { updated, failed } = await applyModelToConversations({ profile: activeProfile, secret }, ids, chosenModelHandle);
-      Alert.alert(
-        failed > 0 ? "Applied with failures" : "Model applied",
-        `${updated} conversation${updated === 1 ? "" : "s"} set to ${chosenModelLabel ?? chosenModelHandle}${failed > 0 ? `, ${failed} failed` : ""}.`,
-      );
-    } catch (e) {
-      Alert.alert("Couldn't apply model", e instanceof Error ? e.message : undefined);
-    } finally {
-      setApplyingModel(false);
-    }
-  };
-
   const load = useCallback(async () => {
-    const profile = activeProfile as Profile | null;
-    if (!profile || !agentId) return;
+    if (!activeProfile || !agentId) return;
     setError(null);
     try {
-      const secret = (await getSecret(profile.id)) ?? "";
-      const page = await listConversations({ profile, secret }, agentId, { limit: PAGE_SIZE });
+      const secret = (await getSecret(activeProfile.id)) ?? "";
+      const page = await listConversations({ profile: activeProfile, secret }, agentId, { limit: PAGE_SIZE });
       loadedAt.current = Date.now();
       setConversations(page);
       setHasMore(page.length === PAGE_SIZE);
-      // The agent's default ("main") conversation is excluded from the list
-      // endpoint — discover it via runs and prepend when found. Runs AFTER
-      // the list renders: discovery is several sequential round-trips and
-      // must never delay the first paint. Failure changes nothing.
-      void fetchHiddenConversations({ profile, secret }, agentId, new Set(page.map((c) => c.id)))
-        .then((hidden) => {
-          if (hidden.length > 0) {
-            setConversations((prev) => {
-              if (!prev) return prev;
-              const have = new Set(prev.map((c) => c.id));
-              const add = hidden.filter((c) => !have.has(c.id));
-              return add.length > 0 ? [...add, ...prev] : prev;
-            });
-          }
-        })
-        .catch(() => { /* decoration-grade */ });
-      // Decoration layers — never block the list on these.
-      // In-progress: one sweep covers every conversation. Refreshed on a
-      // cadence while the screen is shown (runs are transient).
-      const refreshActivity = () =>
-        void fetchRunActivity({ profile, secret }).then((activity) =>
-          setRunningConvs(activity.runningConversations),
-        );
-      refreshActivity();
-      const activityTimer = setInterval(refreshActivity, 20_000);
-      // Last-reply previews: cached by conversation id + last activity, so
-      // only conversations with new messages re-fetch.
-      void (async () => {
-        const results = await Promise.all(
-          page.slice(0, 20).map(async (conv) => {
-            const cacheKey = `letta.preview.${conv.id}`;
-            try {
-              const cached = await AsyncStorage.getItem(cacheKey);
-              if (cached) {
-                const parsed = JSON.parse(cached) as { at?: string; text?: string };
-                if (parsed.text && parsed.at === conv.lastMessageAt) return [conv.id, parsed.text] as const;
-              }
-            } catch {
-              // cache miss — fetch fresh
-            }
-            const text = await fetchLastAssistantPreview({ profile, secret }, conv.id);
-            if (text) {
-              try {
-                await AsyncStorage.setItem(cacheKey, JSON.stringify({ at: conv.lastMessageAt, text }));
-              } catch {
-                // ignore
-              }
-            }
-            return [conv.id, text] as const;
-          }),
-        );
-        const map: Record<string, string> = {};
-        for (const [id, text] of results) {
-          if (text) map[id] = text;
-        }
-        setPreviews(map);
-      })();
-      return () => clearInterval(activityTimer);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Couldn't load conversations.");
       setConversations((prev) => prev ?? []);
@@ -296,43 +126,6 @@ export default function ConversationsScreen() {
     const timer = setTimeout(() => void load(), 0);
     return () => clearTimeout(timer);
   }, [load]);
-
-  useEffect(() => {
-    if (!agentId) return;
-    void loadPinned(pinnedConversationsKey(agentId)).then(setPinned);
-  }, [agentId]);
-
-  // Agent avatar (cache-first): decoration beside the header title.
-  useEffect(() => {
-    if (!agentId || !activeProfile) return;
-    let cancelled = false;
-    void (async () => {
-      const secret = (await getSecret(activeProfile.id)) ?? "";
-      const AVATAR_KEY = `letta.avatar.${agentId}`;
-      let cachedUrl: string | null = null;
-      try {
-        const cached = await AsyncStorage.getItem(AVATAR_KEY);
-        if (cached) {
-          const parsed = JSON.parse(cached) as { dataUrl?: string };
-          if (parsed.dataUrl) cachedUrl = parsed.dataUrl;
-        }
-      } catch { /* cache miss */ }
-      if (!cancelled && cachedUrl) setAvatarUrl(cachedUrl);
-      const fresh = await fetchAgentProfilePicture({ profile: activeProfile, secret }, agentId);
-      if (cancelled) return;
-      if (fresh) {
-        try {
-          const cached = await AsyncStorage.getItem(AVATAR_KEY);
-          const parsed = cached ? (JSON.parse(cached) as { commitSha?: string | null }) : null;
-          if (!(parsed && parsed.commitSha === fresh.commitSha && cachedUrl)) {
-            await AsyncStorage.setItem(AVATAR_KEY, JSON.stringify(fresh));
-            setAvatarUrl(fresh.dataUrl);
-          }
-        } catch { /* cache write fail — still render */ }
-      }
-    })();
-    return () => { cancelled = true; };
-  }, [agentId, activeProfile]);
 
   // Coming back from a chat, the list is stale: titles get auto-summarized and
   // a new conversation may exist. Refetch on focus, but not on every quick
@@ -364,28 +157,20 @@ export default function ConversationsScreen() {
   };
 
   const openChat = (conversation: ConversationSummary) => {
-    if (activeProfile && conversation.lastMessageAt) {
-      void markRead(activeProfile.id, conversation.id, new Date(conversation.lastMessageAt).getTime()).then(setChatMeta);
-    }
     router.push({
       pathname: "/chat",
       params: { conversationId: conversation.id, agentId, agentName, title: conversation.title },
     });
   };
 
-  const [startingNew, setStartingNew] = useState(false);
   const startNew = async () => {
-    if (!activeProfile || startingNew) return;
-    setStartingNew(true);
-    haptic.tap();
+    if (!activeProfile) return;
     try {
       const secret = (await getSecret(activeProfile.id)) ?? "";
       const id = await createConversation({ profile: activeProfile, secret }, agentId);
       router.push({ pathname: "/chat", params: { conversationId: id, agentId, agentName, title: "New conversation" } });
     } catch (e) {
       Alert.alert("Couldn't start a conversation", e instanceof Error ? e.message : undefined);
-    } finally {
-      setStartingNew(false);
     }
   };
 
@@ -433,7 +218,20 @@ export default function ConversationsScreen() {
   };
 
   const showActions = (conversation: ConversationSummary) => {
+    const deletable = activeProfile ? canDeleteConversations({ profile: activeProfile, secret: "" }) : false;
+    Alert.alert(conversation.title, undefined, [
+      { text: "Rename", onPress: () => openRename(conversation) },
+      // Remote app-servers have no delete command — don't offer what can't work.
+      ...(deletable
+        ? [{ text: "Delete", style: "destructive" as const, onPress: () => confirmDelete(conversation) }]
+        : []),
+      { text: "Cancel", style: "cancel" as const },
+    ]);
+  };
 
+  const filtered = (conversations ?? []).filter((c) =>
+    c.title.toLowerCase().includes(search.trim().toLowerCase()),
+  );
 
   return (
     <Screen>
@@ -441,44 +239,21 @@ export default function ConversationsScreen() {
         title={agentName}
         large
         back
-        leading={
-          avatarUrl ? (
-            <Image source={{ uri: avatarUrl }} style={styles.headerAvatar} contentFit="cover" transition={150} />
-          ) : undefined
-        }
         subtitle={
-          <Text role="sub" ink={3}>
+          <Text role="sub" ink={2}>
             {conversations ? `${conversations.length}${hasMore ? "+" : ""} conversations` : "Conversations"}
-            {"\n"}Long-press a conversation for actions.
           </Text>
         }
         trailing={
-          <View style={styles.headerActions}>
-            <Touchable
-              accessibilityLabel="Agent settings"
-              accessibilityRole="button"
-              onPress={openAgentSettings}
-              style={styles.gear}
-            >
-              <Text role="title" ink={2}>
-                ⚙
-              </Text>
-            </Touchable>
-            <Touchable accessibilityLabel="New conversation" accessibilityRole="button" onPress={startNew} disabled={startingNew} style={styles.add}>
-              {startingNew ? (
-                <ActivityIndicator size="small" color={colors.accent} />
-              ) : (
-                <Text role="title" tone="accent">
-                  ＋
-                </Text>
-              )}
-            </Touchable>
-          </View>
+          <Touchable accessibilityLabel="New conversation" accessibilityRole="button" onPress={startNew} style={styles.add}>
+            <Text role="title" tone="accent">
+              ＋
+            </Text>
+          </Touchable>
         }
       />
       {conversations !== null && conversations.length > 0 ? (
         <View style={styles.searchWrap}>
-          <View style={styles.metaRow}>
           <TextInput
             value={search}
             onChangeText={setSearch}
@@ -487,28 +262,6 @@ export default function ConversationsScreen() {
             autoCapitalize="none"
             style={[styles.search, { backgroundColor: colors.surface, borderColor: colors.surfaceEdge, color: colors.ink }]}
           />
-          {visible.some(
-            (c) => c.lastMessageAt !== undefined &&
-              (chatMeta.readCursors[c.id] ?? 0) < new Date(c.lastMessageAt).getTime(),
-          ) ? (
-            <Touchable
-              accessibilityRole="button"
-              accessibilityLabel="Mark all read"
-              onPress={() => {
-                if (!activeProfile || !conversations) return;
-                void markAllRead(
-                  activeProfile.id,
-                  conversations.map((c) => ({ id: c.id, seenAt: c.lastMessageAt ? new Date(c.lastMessageAt).getTime() : Date.now() })),
-                ).then(setChatMeta);
-              }}
-              style={styles.markAll}
-            >
-              <Text role="sub" tone="accent">
-                Mark all read
-              </Text>
-            </Touchable>
-          ) : null}
-          </View>
         </View>
       ) : null}
       {conversations === null ? (
@@ -520,7 +273,6 @@ export default function ConversationsScreen() {
           renderItem={({ item }) => (
             <ConversationRow
               conversation={item}
-
               onPress={() => openChat(item)}
               onLongPress={() => showActions(item)}
             />
@@ -583,284 +335,17 @@ export default function ConversationsScreen() {
           </Text>
         </Touchable>
       </Sheet>
-
-      <Sheet ref={agentSettingsRef} title={agentName} scroll>
-        <Touchable
-          accessibilityRole="button"
-          accessibilityLabel={`Agent ID: ${agentId}. Tap to copy`}
-          onPress={() => {
-            void copyToClipboard(agentId ?? "");
-          }}
-          style={styles.idRow}
-        >
-          <View style={styles.idRowInner}>
-            <Text role="sub" ink={3} style={styles.idLabel}>
-              Agent ID
-            </Text>
-            <Text role="sub" ink={2} mono numberOfLines={1} style={{ flex: 1 }}>
-              {agentId}
-            </Text>
-            <Text role="sub" ink={3}>
-              Copy
-            </Text>
-          </View>
-        </Touchable>
-        <Dropdown
-          label="Notification default"
-          value={agentNotifSetting}
-          options={
-            (
-              [
-                NotificationMode.OFF,
-                NotificationMode.MOBILE_ONLY,
-                NotificationMode.ALL_MESSAGES,
-                NotificationMode.SERVER_DEFAULT,
-                NotificationMode.APP_DEFAULT,
-              ] as NotificationMode[]
-            ).map((option) => ({
-              value: option,
-              label: labelWithResolution(option, agentNotifResolved),
-              danger: option === NotificationMode.OFF,
-            }))
-          }
-          onSelect={(mode) => void selectAgentNotif(mode)}
-        />
-        <Text role="sub" ink={3} style={styles.permHint}>
-          Default for this agent's conversations. Individual conversations can override this in the chat.
-        </Text>
-
-        <Touchable
-          accessibilityRole="button"
-          accessibilityLabel="Reset all conversation notification overrides to agent default"
-          onPress={() =>
-            confirmReset(
-              "Reset conversation notifications?",
-              "Clears notification overrides for all conversations on this agent. They will inherit from the agent and server defaults.",
-              resetConvNotifDownstream,
-            )
-          }
-          style={styles.resetBtn}
-        >
-          <Text role="body" tone="danger">
-            Reset all conversation notification overrides
-          </Text>
-        </Touchable>
-
-        <View style={styles.sectionDivider} />
-
-        <Dropdown
-          label="Permission default"
-          value={agentPermSetting}
-          options={
-            (
-              [
-                PermissionCascadeMode.STRICT,
-                PermissionCascadeMode.STANDARD,
-                PermissionCascadeMode.ACCEPT_EDITS,
-                PermissionCascadeMode.UNRESTRICTED,
-                PermissionCascadeMode.SERVER_DEFAULT,
-                PermissionCascadeMode.APP_DEFAULT,
-              ] as PermissionCascadeValue[]
-            ).map((option) => ({
-              value: option,
-              label: permLabelWithResolution(option, agentPermResolved),
-              detail: permissionDetail(option),
-              danger: option === PermissionCascadeMode.UNRESTRICTED,
-            }))
-          }
-          onSelect={(mode) => void selectAgentPerm(mode)}
-        />
-        <Text role="sub" ink={3} style={styles.permHint}>
-          Default for this agent's conversations. Individual conversations can override this in the chat.
-        </Text>
-
-        <Touchable
-          accessibilityRole="button"
-          accessibilityLabel="Reset all conversation permission overrides to agent default"
-          onPress={() =>
-            confirmReset(
-              "Reset conversation permissions?",
-              "Clears permission overrides for all conversations on this agent. They will inherit from the agent and server defaults.",
-              resetConvPermDownstream,
-            )
-          }
-          style={styles.resetBtn}
-        >
-          <Text role="body" tone="danger">
-            Reset all conversation permission overrides
-          </Text>
-        </Touchable>
-
-        <View style={styles.sectionDivider} />
-
-        <Text role="micro" ink={3} style={styles.sectionLabel}>
-          Model
-        </Text>
-        <Touchable
-          accessibilityRole="button"
-          accessibilityLabel={chosenModelLabel ? `Model: ${chosenModelLabel}` : "Choose a model"}
-          onPress={openModelPick}
-          style={styles.modelPickBtn}
-        >
-          <View style={styles.modelPickInner}>
-            <View style={styles.modelPickText}>
-              <Text role="body">{chosenModelLabel ?? "Choose a model…"}</Text>
-              {chosenModelHandle ? (
-                <Text role="sub" ink={3} mono numberOfLines={1}>
-                  {chosenModelHandle}
-                </Text>
-              ) : (
-                <Text role="sub" ink={3}>
-                  Applies to every conversation on this agent
-                </Text>
-              )}
-            </View>
-            <Text role="body" ink={3}>
-              ▾
-            </Text>
-          </View>
-        </Touchable>
-        <Touchable
-          accessibilityRole="button"
-          accessibilityLabel="Apply model to all conversations on this agent"
-          disabled={!chosenModelHandle || applyingModel}
-          onPress={() =>
-            confirmReset(
-              "Apply model to all conversations?",
-              `Sets every conversation on ${agentName} to ${chosenModelLabel}. Conversations already on this model are re-set harmlessly.`,
-              applyModelDownstream,
-            )
-          }
-          style={[styles.applyBtn, (!chosenModelHandle || applyingModel) && { opacity: 0.5 }]}
-        >
-          <Text role="body" tone="accent">
-            {applyingModel ? "Applying…" : "Apply model to all conversations"}
-          </Text>
-        </Touchable>
-      </Sheet>
-
-      <ModelSheet
-        ref={modelPickRef}
-        models={models}
-        currentModel={chosenModelHandle}
-        currentEffort={null}
-        onSelect={() => {}}
-        onPick={(handle) => {
-          setChosenModelHandle(handle);
-          modelPickRef.current?.dismiss();
-        }}
-        onSheetDismiss={() => {
-          if (pickFromSettings) {
-            setPickFromSettings(false);
-            agentSettingsRef.current?.present();
-          }
-        }}
-      />
-      <Sheet
-        ref={actionsSheetRef}
-        title={actionTarget?.title ?? "Actions"}
-        onSheetDismiss={() => setActionTarget(null)}
-      >
-        {actionTarget ? (
-          (() => {
-            const pinKey = agentId ? pinnedConversationsKey(agentId) : null;
-            const pinnedNow = pinned.has(actionTarget.id);
-            const deletable = activeProfile
-              ? canDeleteConversations({ profile: activeProfile, secret: "" })
-              : false;
-            return (
-              <>
-                {pinKey ? (
-                  <Touchable
-                    accessibilityRole="button"
-                    accessibilityLabel={pinnedNow ? `Unpin ${actionTarget.title}` : `Pin ${actionTarget.title} to top`}
-                    onPress={() => {
-                      void togglePinned(pinKey, actionTarget.id).then(setPinned);
-                      actionsSheetRef.current?.dismiss();
-                    }}
-                    style={styles.actionRow}
-                  >
-                    <Text role="body">{pinnedNow ? "★ Unpin" : "☆ Pin to top"}</Text>
-                  </Touchable>
-                ) : null}
-                <Touchable
-                  accessibilityRole="button"
-                  accessibilityLabel={`Copy conversation ID for ${actionTarget.title}`}
-                  onPress={() => {
-                    void copyToClipboard(actionTarget.id);
-                    actionsSheetRef.current?.dismiss();
-                  }}
-                  style={styles.actionRow}
-                >
-                  <Text role="body">Copy conversation ID</Text>
-                </Touchable>
-                <Touchable
-                  accessibilityRole="button"
-                  accessibilityLabel={`Rename ${actionTarget.title}`}
-                  onPress={() => {
-                    actionsSheetRef.current?.dismiss();
-                    openRename(actionTarget);
-                  }}
-                  style={styles.actionRow}
-                >
-                  <Text role="body">Rename</Text>
-                </Touchable>
-                {deletable ? (
-                  <Touchable
-                    accessibilityRole="button"
-                    accessibilityLabel={`Delete ${actionTarget.title}`}
-                    onPress={() => {
-                      actionsSheetRef.current?.dismiss();
-                      confirmDelete(actionTarget);
-                    }}
-                    style={styles.actionRow}
-                  >
-                    <Text role="body" tone="danger">
-                      Delete
-                    </Text>
-                  </Touchable>
-                ) : null}
-              </>
-            );
-          })()
-        ) : null}
-      </Sheet>
     </Screen>
   );
 }
 
 const styles = StyleSheet.create({
-  idRow: { paddingVertical: 10 },
-  idRowInner: { flexDirection: "row", alignItems: "center", gap: 8 },
-  idLabel: { width: 110 },
-  headerAvatar: { width: 44, height: 44, borderRadius: 999 },
-  actionRow: { paddingVertical: 14 },
-  runningRow: { flexDirection: "row", alignItems: "center", gap: 8 },
   list: { paddingBottom: space.xxl, flexGrow: 1 },
   row: { paddingHorizontal: space.gutter },
-  metaRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 8 },
-  markAll: { paddingHorizontal: 8, paddingVertical: 4 },
-  titleRow: { flexDirection: "row", alignItems: "center", gap: 6 },
-  unreadDot: { width: 8, height: 8, borderRadius: 4 },
   rowInner: { flexDirection: "row", alignItems: "center", paddingVertical: 14 },
   rowText: { flex: 1, gap: 2 },
   divider: { height: StyleSheet.hairlineWidth },
   add: { paddingHorizontal: space.sm },
-  gear: { paddingHorizontal: space.sm, marginRight: space.xs },
-  headerActions: { flexDirection: "row", alignItems: "center" },
-  sectionLabel: { paddingTop: space.sm, paddingBottom: 2 },
-  sectionDivider: { height: StyleSheet.hairlineWidth, marginVertical: space.md, backgroundColor: "transparent" },
-  permHint: { paddingTop: space.md, fontStyle: "italic" },
-  resetBtn: { paddingVertical: space.sm, alignItems: "center" },
-  modelPickBtn: {
-    borderWidth: StyleSheet.hairlineWidth,
-    borderRadius: radius.row,
-    paddingHorizontal: space.md,
-    paddingVertical: 9,
-  },
-  modelPickInner: { flexDirection: "row", alignItems: "center", gap: space.sm },
-  modelPickText: { flex: 1, gap: 1 },
-  applyBtn: { paddingVertical: space.sm, alignItems: "center" },
   footer: { textAlign: "center", paddingVertical: space.md },
   searchWrap: { paddingHorizontal: space.gutter, paddingBottom: space.sm },
   search: {

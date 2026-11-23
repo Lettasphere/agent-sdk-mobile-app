@@ -12,7 +12,6 @@ import {
   ActivityIndicator,
   AppState,
   FlatList,
-  Keyboard,
   KeyboardAvoidingView,
   Platform,
   StyleSheet,
@@ -25,8 +24,6 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { ApprovalCard } from "../components/chat/ApprovalCard";
 import { ConnectionBanner } from "../components/chat/Banner";
-import { EnvironmentSheet } from "../components/chat/EnvironmentSheet";
-import { loadConversationEnv, saveConversationEnv, type ConversationEnv } from "../lib/conversationEnv";
 import { ModelSheet } from "../components/chat/ModelSheet";
 import { QueueCapsule } from "../components/chat/QueueCapsule";
 import { QueueSheet } from "../components/chat/QueueSheet";
@@ -42,7 +39,6 @@ import {
 import { ToolDetailSheet } from "../components/chat/ToolDetailSheet";
 import { EmptyState } from "../components/ui/EmptyState";
 import { Header, Screen } from "../components/ui/Screen";
-import { Dropdown } from "../components/ui/Dropdown";
 import { Sheet } from "../components/ui/Sheet";
 import { SkeletonList } from "../components/ui/Skeleton";
 import { StatusDot } from "../components/ui/StatusDot";
@@ -50,35 +46,11 @@ import { Text } from "../components/ui/Text";
 import { Touchable } from "../components/ui/Touchable";
 import { haptic } from "../lib/haptics";
 import { ChatSession } from "../lib/letta/ChatSession";
-import { clearConversationNotifications, setVisibleConversation } from "../../modules/background-poll";
-import { isNativelyWatched, registerLocalRunWatch, armMobileOnlyOneShot, disarmMobileOnlyOneShot, retireMobileOnlyOneShotRecord } from "../lib/backgroundPolling";
-
 import {
-  NotificationMode,
-  labelWithResolution,
-  resolveMode,
-  loadConversationSetting,
-  saveConversationSetting,
-  loadServerSetting,
-  loadAppDefault,
-  resolveEffectiveMode,
-} from "../lib/notifications";
-import {
-  configureNotifications,
-  ensureChannel,
-  postConversationNotification,
-  requestNotificationPermission,
-} from "../lib/notificationPoster";
-import { setStringAsync as copyToClipboard } from "expo-clipboard";
-import {
-  renameConversation,
   getConversationModel,
   isAuthError,
-  listComputers,
   listModels,
-  modelSupportsEffort,
   updateConversationModel,
-  type ComputerSummary,
   type ModelOption,
   type ReasoningEffort,
 } from "../lib/letta/api";
@@ -86,21 +58,12 @@ import {
   emptyChat,
   type ChatSnapshot,
   type ConnectionPhase,
+  type PermissionMode,
   type ToolItem,
 } from "../lib/letta/model";
-import {
-  PermissionCascadeMode,
-  type PermissionCascadeValue,
-  permLabelWithResolution,
-  permissionDetail,
-  loadConversationPerm,
-  saveConversationPerm,
-  resolvePermission,
-  resolveEffectivePermission,
-} from "../lib/permissions";
-import { groupToolRuns, type TranscriptRowItem } from "@angus/letta-client-core";
+import { groupToolRuns, type TranscriptRowItem } from "../lib/letta/grouping";
 import { pickImages, type Attachment } from "../lib/letta/attachments";
-import { getSecret, saveProfile } from "../lib/profiles/profiles";
+import { getSecret } from "../lib/profiles/profiles";
 import { useProfiles } from "../lib/profiles/ProfilesContext";
 import { useTheme } from "../theme/ThemeProvider";
 import { motion, radius, space } from "../theme/tokens";
@@ -152,89 +115,11 @@ function statusFor(
   return { label: "Connected", tone: "run" };
 }
 
-/** Inline rename field for the conversation title. */
-function RenameRow({
-  initial,
-  onSubmit,
-}: {
-  initial: string;
-  onSubmit: (title: string) => Promise<void>;
-}) {
-  const [draft, setDraft] = useState(initial);
-  const [saving, setSaving] = useState(false);
-  const dirty = draft.trim().length > 0 && draft.trim() !== initial;
-  return (
-    <View style={styles.renameRow}>
-      <TextInput
-        value={draft}
-        onChangeText={setDraft}
-        placeholder="Conversation title"
-        placeholderTextColor={"#8B9096"}
-        style={{ flex: 1, color: undefined }}
-        returnKeyType="done"
-        onSubmitEditing={() => {
-          if (dirty && !saving) {
-            setSaving(true);
-            void onSubmit(draft.trim()).finally(() => setSaving(false));
-          }
-        }}
-      />
-      <Touchable
-        accessibilityRole="button"
-        accessibilityLabel="Rename conversation"
-        disabled={!dirty || saving}
-        onPress={() => {
-          if (dirty && !saving) {
-            setSaving(true);
-            void onSubmit(draft.trim()).finally(() => setSaving(false));
-          }
-        }}
-        style={styles.renameBtn}
-      >
-        <Text role="sub" tone={dirty && !saving ? "accent" : undefined} ink={dirty && !saving ? undefined : 3}>
-          {saving ? "Saving…" : "Rename"}
-        </Text>
-      </Touchable>
-    </View>
-  );
-}
-
-/** A settings row that copies its value on tap — "Copied" flashes in place. */
-function CopyIdRow({ label, value }: { label: string; value: string }) {
-  const { colors } = useTheme();
-  const [copied, setCopied] = useState(false);
-  return (
-    <Touchable
-      accessibilityRole="button"
-      accessibilityLabel={`${label}: ${value}. Tap to copy`}
-      onPress={() => {
-        void copyToClipboard(value).then(() => {
-          setCopied(true);
-          setTimeout(() => setCopied(false), 1200);
-        });
-      }}
-      style={styles.idRow}
-    >
-      <View style={styles.idRowInner}>
-        <Text role="sub" ink={3} style={styles.idLabel}>
-          {label}
-        </Text>
-        <Text role="sub" ink={2} mono numberOfLines={1} style={{ flex: 1 }}>
-          {value}
-        </Text>
-        <Text role="sub" tone={copied ? "accent" : undefined} ink={copied ? undefined : 3}>
-          {copied ? "Copied" : "Copy"}
-        </Text>
-      </View>
-    </Touchable>
-  );
-}
-
 export default function ChatScreen() {
   const params = useLocalSearchParams<{ conversationId: string; agentId: string; agentName?: string; title?: string; autosend?: string }>();
   const { colors } = useTheme();
   const insets = useSafeAreaInsets();
-  const { activeProfile, refresh: refreshProfiles } = useProfiles();
+  const { activeProfile } = useProfiles();
 
   const sessionRef = useRef<ChatSession | null>(null);
   const listRef = useRef<FlatList<TranscriptRowItem>>(null);
@@ -244,17 +129,9 @@ export default function ChatScreen() {
   // rename (here or elsewhere) makes the server's value the truth.
   const [serverTitle, setServerTitle] = useState<string | null>(null);
   const [nearBottom, setNearBottom] = useState(true);
-  const [keyboardOpen, setKeyboardOpen] = useState(false);
   // Collapsed tool runs the reader has opened (see lib/letta/grouping).
   const [expandedGroups, setExpandedGroups] = useState<ReadonlySet<string>>(() => new Set());
   const [attachments, setAttachments] = useState<Attachment[]>([]);
-  // Notification state: per-conversation setting + dropdown visibility.
-  const [notifSetting, setNotifSetting] = useState<NotificationMode>(NotificationMode.APP_DEFAULT);
-  const [notifResolved, setNotifResolved] = useState<NotificationMode>(NotificationMode.ALL_MESSAGES);
-  // Permission cascade state: per-conversation setting + resolved mode.
-  const [permSetting, setPermSetting] = useState<PermissionCascadeValue>(PermissionCascadeMode.AGENT_DEFAULT);
-  const [permResolved, setPermResolved] = useState<PermissionCascadeValue>(PermissionCascadeMode.STANDARD);
-  const [permError, setPermError] = useState<string | null>(null);
   const attach = useCallback(async () => {
     haptic.tap();
     const picked = await pickImages();
@@ -294,33 +171,13 @@ export default function ChatScreen() {
       if (state === "active") {
         const away = backgroundedAt.current ? Date.now() - backgroundedAt.current : Infinity;
         backgroundedAt.current = null;
-        if (sessionRef.current) sessionRef.current.isScreenVisible = true;
         if (away > 30_000) void sessionRef.current?.reconnect();
         return;
       }
       backgroundedAt.current ??= Date.now();
-      if (sessionRef.current) sessionRef.current.isScreenVisible = false;
-      // Background run polling is owned by the root layout
-      // (BackgroundPollingLifecycle) — it enumerates ALL_MESSAGES
-      // conversations regardless of which screen backgrounded.
     });
-    return () => {
-      sub.remove();
-    };
+    return () => sub.remove();
   }, []);
-
-  // Track keyboard visibility so the composer bottom padding can collapse
-  // to zero when the keyboard is open — no gap between send button and keyboard.
-  useEffect(() => {
-    const showSub = Keyboard.addListener("keyboardDidShow", () => setKeyboardOpen(true));
-    const hideSub = Keyboard.addListener("keyboardDidHide", () => setKeyboardOpen(false));
-    return () => {
-      showSub.remove();
-      hideSub.remove();
-    };
-  }, []);
-
-
 
   // Drafts survive navigation and app restarts (per-conversation key).
   const draftKey = `letta.draft.${params.conversationId}`;
@@ -367,14 +224,10 @@ export default function ChatScreen() {
   // Conversation-scoped model + reasoning controls.
   const modelSheetRef = useRef<BottomSheetModal>(null);
   const queueSheetRef = useRef<BottomSheetModal>(null);
-  const convSettingsRef = useRef<BottomSheetModal>(null);
-  const envSheetRef = useRef<BottomSheetModal>(null);
+  const controlsSheetRef = useRef<BottomSheetModal>(null);
   const [models, setModels] = useState<ModelOption[]>([]);
   const [model, setModel] = useState<string | null>(null);
   const [effort, setEffort] = useState<string | null>(null);
-  const [computers, setComputers] = useState<ComputerSummary[]>([]);
-  const [envLoading, setEnvLoading] = useState(false);
-  const [envError, setEnvError] = useState<string | null>(null);
   const [modelSaving, setModelSaving] = useState(false);
   const [modelError, setModelError] = useState<string | null>(null);
   const [approvalSubmitting, setApprovalSubmitting] = useState<"allow" | "deny" | undefined>();
@@ -407,125 +260,6 @@ export default function ChatScreen() {
     [],
   );
 
-  // Report the on-screen conversation so the native poller suppresses
-  // notifications for exactly this one (any other conversation still fires).
-  // Suppression is FOREGROUND-only: backgrounded the screen stays mounted but
-  // notifications must flow again (a mounted-but-hidden screen is not
-  // "viewing" — the queued-then-fired-on-exit bug in reverse).
-  useEffect(() => {
-    void setVisibleConversation(params.conversationId ?? null);
-    const sub = AppState.addEventListener("change", (state) => {
-      void setVisibleConversation(state === "active" ? (params.conversationId ?? null) : null);
-    });
-    return () => {
-      sub.remove();
-      void setVisibleConversation(null);
-    };
-  }, [params.conversationId]);
-
-  // Load the per-conversation notification setting when the conversation opens.
-  // Also request notification permission (no-op if already granted).
-  useEffect(() => {
-    if (!params.conversationId) return;
-    let cancelled = false;
-    void (async () => {
-      void requestNotificationPermission();
-      const [conv, server, app] = await Promise.all([
-        loadConversationSetting(params.conversationId),
-        activeProfile ? loadServerSetting(activeProfile.id) : Promise.resolve(NotificationMode.APP_DEFAULT),
-        loadAppDefault(),
-      ]);
-      if (cancelled) return;
-      setNotifSetting(conv);
-      setNotifResolved(resolveMode(conv, NotificationMode.SERVER_DEFAULT, server, app));
-      // Load permission cascade state.
-      const permConv = await loadConversationPerm(params.conversationId);
-      const permResolvedVal = await resolveEffectivePermission(
-        params.conversationId,
-        params.agentId,
-        activeProfile?.id,
-      );
-      if (!cancelled) {
-        setPermSetting(permConv);
-        setPermResolved(permResolvedVal);
-      }
-    })();
-    return () => { cancelled = true; };
-  }, [params.conversationId, activeProfile]);
-
-  // Handle a run completion: check notification mode + screen visibility,
-  // post a system notification if appropriate.
-  const handleRunCompletion = useCallback(
-    async (conversationId: string, title: string, success: boolean, isExternal: boolean) => {
-      const session = sessionRef.current;
-      if (!session) return;
-      // Don't notify if the screen is visible — the user is already watching.
-      if (session.isScreenVisible) return;
-      const mode = await resolveEffectiveMode(conversationId, params.agentId, activeProfile?.id);
-      if (mode === NotificationMode.OFF) return;
-      // MOBILE_ONLY: only notify for runs started from this app.
-      if (mode === NotificationMode.MOBILE_ONLY && isExternal) return;
-      // The native poller owns delivery for anything it watches — regular
-      // ALL_MESSAGES specs AND one-shot MOBILE_ONLY specs (runs started here,
-      // app backgrounded mid-turn). Before this guard both systems fired and
-      // every completion was a double notification.
-      if (isNativelyWatched(conversationId)) return;
-      await postConversationNotification(
-        conversationId,
-        title,
-        success ? "Run complete" : "Run ended with an error",
-        { agentId: params.agentId, agentName: params.agentName },
-      );
-    },
-    [params.agentId, activeProfile],
-  );
-
-  // Handle a send failure (e.g. "app-server socket closed"): the bubble shows
-  // "Not sent · Tap to retry" inline, but the user may be off-screen — fire the
-  // same notification pipeline when notifications are on for this conversation.
-  const handleSendFailed = useCallback(
-    async (reason: string) => {
-      // The one-shot armed at send time is now pointless — the run never
-      // started server-side. Retire it so the poller isn't watching a
-      // conversation for a turn that will never end.
-      void disarmMobileOnlyOneShot(params.conversationId);
-      const session = sessionRef.current;
-      if (!session) return;
-      // Don't notify if the screen is visible — the failed bubble is right there.
-      if (session.isScreenVisible) return;
-      const mode = await resolveEffectiveMode(params.conversationId, params.agentId, activeProfile?.id);
-      if (mode === NotificationMode.OFF) return;
-      const title = params.title ?? params.agentName ?? "Conversation";
-      await postConversationNotification(
-        params.conversationId,
-        `${title} — message not sent`,
-        `Tap to retry. ${reason}`,
-        { agentId: params.agentId, agentName: params.agentName },
-      );
-    },
-    [params.conversationId, params.agentId, params.title, params.agentName, activeProfile],
-  );
-
-  // Per-conversation environment (conversationEnv.ts): undefined inherits the
-  // profile's selector, null forces Cloud Sandbox, a selector pins a computer
-  // for THIS conversation only.
-  const [convEnv, setConvEnv] = useState<{ selector: ConversationEnv["selector"] }>({ selector: undefined });
-  // Bumped when the environment changes: restarts the session-lifecycle
-  // effect (which nulled sessionRef) so a fresh ChatSession with the new
-  // selector opens immediately — without this, send() silently no-ops until
-  // the screen is re-entered.
-  const [envNonce, setEnvNonce] = useState(0);
-  useEffect(() => {
-    if (!params.conversationId) return;
-    let cancelled = false;
-    void loadConversationEnv(params.conversationId).then((env) => {
-      if (!cancelled) setConvEnv({ selector: env.selector });
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [params.conversationId]);
-
   // Session lifecycle — one ChatSession per open conversation.
   useEffect(() => {
     if (!activeProfile || !params.conversationId) return;
@@ -534,13 +268,7 @@ export default function ChatScreen() {
     void (async () => {
       try {
         const secret = (await getSecret(activeProfile.id)) ?? "";
-        const env = await loadConversationEnv(params.conversationId);
-        const session = ChatSession.open(
-          { profile: activeProfile, secret },
-          params.conversationId,
-          params.agentId,
-          { selector: env.selector },
-        );
+        const session = ChatSession.open({ profile: activeProfile, secret }, params.conversationId);
         if (cancelled) {
           session.close();
           return;
@@ -551,64 +279,6 @@ export default function ChatScreen() {
         // snapshot-time scroll races layout, since the hydration batch measures
         // after the scroll fires.
         session.subscribe(setSnapshot);
-        // Notification hooks: fire on run completion. The session distinguishes
-        // local runs (started from this app) from external runs (started from
-        // another client). The UI checks isScreenVisible + notification mode
-        // to decide whether to post a system notification.
-        session.isScreenVisible = true;
-        const convTitle = params.title ?? params.agentName ?? "Conversation";
-        // MOBILE_ONLY delivery while backgrounded: register this session so
-        // the native poller can take over the in-flight local run when JS
-        // pauses (one-shot spec — retires after the turn completes).
-        registerLocalRunWatch(params.conversationId, {
-          agentId: params.agentId ?? "",
-          title: convTitle,
-          agentName: params.agentName ?? undefined,
-          hasLocalRun: () => session.hasLocalRunInFlight(),
-        });
-        session.onTurnCompleted = (success: boolean) => {
-          // Local run completed — the armed one-shot record has served its
-          // purpose (the poller fired or consumed the turn). Drop it so a
-          // later re-enumeration can't carry a dead spec forward (which
-          // would notify on external runs — the MOBILE_ONLY violation).
-          retireMobileOnlyOneShotRecord(params.conversationId);
-          // Local run completed — fires for MOBILE_ONLY and ALL_MESSAGES.
-          void handleRunCompletion(params.conversationId, convTitle, success, false);
-        };
-        // Send-time arm: the moment a local run starts, hand delivery to the
-        // native poller (MOBILE_ONLY only). If the user leaves this screen
-        // while the run is in flight, every JS callback here dies with the
-        // unmount — the native one-shot is the only survivor. Arming an
-        // ALL_MESSAGES conversation is unnecessary (its regular watch
-        // already covers it) and would downgrade spec semantics.
-        session.onLocalRunStarted = () => {
-          void (async () => {
-            try {
-              const mode = await resolveEffectiveMode(params.conversationId, params.agentId, activeProfile?.id);
-              if (mode !== NotificationMode.MOBILE_ONLY) return;
-              await armMobileOnlyOneShot(
-                params.conversationId,
-                { agentId: params.agentId ?? "", title: convTitle, agentName: params.agentName ?? undefined },
-                activeProfile ? { profile: activeProfile, secret: (await getSecret(activeProfile.id)) ?? "" } : null,
-              );
-            } catch (e) {
-              // Teardown races this IIFE (screen unmounted mid-resolve) —
-              // never an unhandled rejection; the native arm simply didn't
-              // land and the poller won't watch this turn.
-              console.log(`[BG-POLL] send-time arm failed conv=${params.conversationId.slice(-8)}: ${e instanceof Error ? e.message : String(e)}`);
-            }
-          })();
-        };
-        session.onExternalRunCompleted = (success: boolean) => {
-          // External run completed — fires only for ALL_MESSAGES.
-          void handleRunCompletion(params.conversationId, convTitle, success, true);
-        };
-        session.onSendFailed = (reason: string) => {
-          void handleSendFailed(reason);
-        };
-        // Attach the live stream even before any local send so runs started
-        // from other clients complete on-screen and notify (ALL_MESSAGES).
-        session.warmup();
       } catch (error) {
         if (!cancelled) {
           setSnapshot({
@@ -621,12 +291,10 @@ export default function ChatScreen() {
     })();
     return () => {
       cancelled = true;
-      registerLocalRunWatch(params.conversationId, null);
       opened?.close();
       sessionRef.current = null;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- envNonce intentionally restarts this effect
-  }, [activeProfile, params.conversationId, envNonce]);
+  }, [activeProfile, params.conversationId]);
 
   // Load the current conversation model once hydration settles — on remote,
   // concurrent control-channel connections collide (single-slot app-server).
@@ -648,13 +316,10 @@ export default function ChatScreen() {
           current = await getConversationModel(
             { profile: activeProfile, secret: (await getSecret(activeProfile.id)) ?? "" },
             params.conversationId,
-            params.agentId,
           );
         }
         setModel(current.model);
-        // Gate the tier on provider capability: records written before the
-        // clear-on-switch fix can carry a stale effort from a previous model.
-        setEffort(modelSupportsEffort(current.model) ? current.reasoningEffort : null);
+        setEffort(current.reasoningEffort);
         if (current.title) setServerTitle(current.title);
       } catch {
         // Chip falls back to "model" affordance; sheet still works.
@@ -683,9 +348,7 @@ export default function ChatScreen() {
       modelSheetRef.current?.dismiss();
       const previous = { model, effort };
       setModel(handle);
-      // Clear-or-set: switching to a model without effort tiers must drop the
-      // stale tier, not carry the previous model's level on the chip.
-      setEffort(nextEffort ?? null);
+      if (nextEffort) setEffort(nextEffort);
       setModelSaving(true);
       try {
         if (activeProfile.type === "remote" && sessionRef.current) {
@@ -694,9 +357,7 @@ export default function ChatScreen() {
           const secret = (await getSecret(activeProfile.id)) ?? "";
           await updateConversationModel({ profile: activeProfile, secret }, params.conversationId, {
             model: handle,
-            // Explicit null clears the record's reasoning_effort (a model-only
-            // PATCH leaves the old tier behind — verified Sept 24).
-            reasoningEffort: nextEffort ?? null,
+            ...(nextEffort ? { reasoningEffort: nextEffort } : {}),
           });
         }
       } catch (e) {
@@ -711,106 +372,8 @@ export default function ChatScreen() {
     [activeProfile, params.conversationId, model, effort],
   );
 
-  // ── Environment selector (cloud profiles only) ──────────────────────────
-  const openEnvSheet = useCallback(async () => {
-    if (!activeProfile) return;
-    setEnvError(null);
-    envSheetRef.current?.present();
-    if (computers.length === 0 && activeProfile.type === "cloud") {
-      setEnvLoading(true);
-      try {
-        const secret = (await getSecret(activeProfile.id)) ?? "";
-        setComputers(await listComputers({ profile: activeProfile, secret }));
-      } catch {
-        setEnvError("Couldn't load environments.");
-      } finally {
-        setEnvLoading(false);
-      }
-    }
-  }, [activeProfile, computers.length]);
-
   const running = snapshot.run === "running" || snapshot.run === "awaiting_approval";
   const aborting = snapshot.run === "aborting";
-
-  const selectEnvironment = useCallback(
-    async (
-      connectionId: string | null,
-      name: string | null,
-      deviceId?: string,
-      asDefault?: boolean,
-    ): Promise<boolean> => {
-      if (!activeProfile || !params.conversationId) return false;
-      // An env change restarts the session (envNonce) — a send in flight at
-      // that moment would be closed mid-run and its failure swallowed (the
-      // close clears the listeners the failure path commits to). Block the
-      // change while a run is active or stopping; the sheet stays open and
-      // shows this message (it defers its dismiss until we resolve).
-      if (running || aborting) {
-        setEnvError("Wait for the current run to finish before changing the environment.");
-        return false;
-      }
-      // Store the DEVICE id (stable across remote restarts) — the session
-      // resolves it to the current connection lease at attach time.
-      // PER-CONVERSATION: written to AsyncStorage keyed by this conversation,
-      // NOT to the profile — the old profile write rerouted every other
-      // conversation on the account.
-      const selector =
-        deviceId && connectionId
-          ? { deviceId, connectionId, name: name ?? undefined }
-          : null; // no deviceId = Cloud Sandbox choice
-      try {
-        await saveConversationEnv(params.conversationId, selector);
-      } catch {
-        // The conversation choice itself failed — nothing applied, keep the
-        // sheet open with the error visible (it defers its dismiss until we
-        // resolve).
-        setEnvError("Couldn't save the environment choice.");
-        return false;
-      }
-      // The conversation choice is durable from here — apply it optimistically
-      // and restart the session so routing matches the chip no matter what
-      // happens to the (optional) account-default write below.
-      setConvEnv({ selector });
-      setEnvNonce((n) => n + 1);
-      if (asDefault) {
-        // Keep the account-level default writable: this is what NEW
-        // conversations inherit when they have no override of their own.
-        // Cloud Sandbox (null) clears the profile default. Failure here
-        // leaves the conversation pick intact (it saved) — surface it
-        // without rolling the chip back into a lying state.
-        try {
-          await saveProfile(
-            { ...activeProfile, computerSelector: selector ?? undefined },
-            null,
-          );
-          await refreshProfiles();
-        } catch {
-          setEnvError("Saved for this conversation, but couldn't update the default for new ones.");
-          return false;
-        }
-      }
-      return true;
-    },
-    [activeProfile, params.conversationId, running, aborting, refreshProfiles],
-  );
-
-  // Effective selector for THIS conversation: conversation override first,
-  // then the profile default. Drives the chip label and the sheet's selected
-  // row.
-  const effectiveSelector: ConversationEnv["selector"] =
-    convEnv.selector === undefined ? activeProfile?.computerSelector : convEnv.selector;
-  const envChipLabel =
-    effectiveSelector == null
-      ? null
-      : typeof effectiveSelector === "string"
-        ? effectiveSelector
-        : "name" in effectiveSelector && effectiveSelector.name
-          ? effectiveSelector.name
-          : "deviceId" in effectiveSelector
-            ? effectiveSelector.deviceId.slice(0, 8)
-            : "connectionId" in effectiveSelector
-              ? effectiveSelector.connectionId.slice(0, 8)
-              : "env";
 
   // Send ↔ stop morph.
   const morph = useSharedValue(0);
@@ -923,20 +486,8 @@ export default function ChatScreen() {
             <StatusDot tone={status.tone} />
           </View>
         }
-        trailing={
-          <Touchable
-            accessibilityLabel="Conversation settings"
-            accessibilityRole="button"
-            onPress={() => convSettingsRef.current?.present()}
-            style={styles.gear}
-          >
-            <Text role="title" ink={2}>
-              ⚙
-            </Text>
-          </Touchable>
-        }
       />
-      <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : "height"} style={styles.flex}>
+      <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : undefined} style={styles.flex}>
         <View style={styles.flex}>
           {snapshot.hydrating ? (
             <SkeletonList rows={4} avatar={false} />
@@ -982,10 +533,6 @@ export default function ChatScreen() {
                 </View>
               ) : null
             }
-            // Android's inverted list applies scale: -1 (BOTH axes — RN's
-            // verticallyInverted style), so the counter-rotation must flip
-            // both axes too: scaleY alone left the text left-right mirrored.
-            // iOS inverts with scaleY only, so the counter is scaleY only.
             ListEmptyComponent={
               <View style={styles.invertedEmpty}>
                 <EmptyState message={`No messages yet. Say hello to ${agentName}.`} />
@@ -1028,7 +575,7 @@ export default function ChatScreen() {
         <View
           style={[
             styles.composerWrap,
-            { borderColor: colors.surfaceEdge, paddingBottom: keyboardOpen ? 0 : Math.max(insets.bottom, space.md) },
+            { borderColor: colors.surfaceEdge, paddingBottom: Math.max(insets.bottom, space.md) },
           ]}
         >
           {snapshot.connection !== "connected" ? (
@@ -1118,15 +665,19 @@ export default function ChatScreen() {
                 {!modelSaving && effort ? ` · ${effort}` : ""}
               </Text>
             </Touchable>
-            {activeProfile?.type === "cloud" ? (
+            {snapshot.device ? (
               <Touchable
                 accessibilityRole="button"
-                accessibilityLabel={`Environment: ${envChipLabel ?? "Cloud Sandbox"}. Change environment`}
-                onPress={openEnvSheet}
+                accessibilityLabel={`Permission mode: ${snapshot.device.permissionMode}. Change controls`}
+                onPress={() => controlsSheetRef.current?.present()}
                 style={styles.modelChip}
               >
-                <Text role="sub" ink={2} mono numberOfLines={1}>
-                  {envChipLabel ?? "cloud"}
+                <Text role="sub" ink={2}>
+                  {snapshot.device.permissionMode === "acceptEdits"
+                    ? "Accept edits"
+                    : snapshot.device.permissionMode === "unrestricted"
+                      ? "Unrestricted"
+                      : "Standard"}
                 </Text>
               </Touchable>
             ) : null}
@@ -1175,120 +726,45 @@ export default function ChatScreen() {
           queueSheetRef.current?.dismiss();
         }}
       />
-      <Sheet ref={convSettingsRef} title="Conversation settings" scroll>
-        <RenameRow
-          initial={title}
-          onSubmit={async (t) => {
-            if (!activeProfile || !params.conversationId) return;
-            const secret = (await getSecret(activeProfile.id)) ?? "";
-            await renameConversation({ profile: activeProfile, secret }, params.conversationId, t);
-            setServerTitle(t);
-          }}
-        />
-        <CopyIdRow label="Conversation ID" value={params.conversationId ?? "—"} />
-        <CopyIdRow label="Agent ID" value={params.agentId ?? "—"} />
-        <Dropdown
-          label="Permission mode"
-          value={permSetting}
-          error={permError}
-          options={
-            (
-              [
-                PermissionCascadeMode.STRICT,
-                PermissionCascadeMode.STANDARD,
-                PermissionCascadeMode.ACCEPT_EDITS,
-                PermissionCascadeMode.UNRESTRICTED,
-                PermissionCascadeMode.AGENT_DEFAULT,
-                PermissionCascadeMode.SERVER_DEFAULT,
-                PermissionCascadeMode.APP_DEFAULT,
-              ] as PermissionCascadeValue[]
-            ).map((option) => ({
-              value: option,
-              label: permLabelWithResolution(option, permResolved),
-              detail: permissionDetail(option),
-              danger: option === PermissionCascadeMode.UNRESTRICTED,
-            }))
-          }
-          onSelect={(option) => {
-            setPermSetting(option);
-            setPermError(null);
-            console.log(`[PERM] UI user selected ${option} in conversation ${String(params.conversationId).slice(-8)}`);
-            void sessionRef.current?.setCascadePermission(option).then(() => {
-              return resolveEffectivePermission(
-                params.conversationId,
-                params.agentId,
-                activeProfile?.id,
-              ).then((resolved) => setPermResolved(resolved));
-            }).catch((e) => {
-              // ensureSession can throw (e.g. this conversation's environment
-              // device is offline) — surface it, never leave the optimistic
-              // dropdown value silently lying about the server state.
-              setPermSetting(permSetting);
-              setPermError(e instanceof Error ? e.message : "Couldn't change permissions.");
-            });
-          }}
-        />
-
-        <View style={styles.sectionDivider} />
-
-        <Dropdown
-          label="Notifications"
-          value={notifSetting}
-          options={
-            (
-              [
-                NotificationMode.OFF,
-                NotificationMode.MOBILE_ONLY,
-                NotificationMode.ALL_MESSAGES,
-                NotificationMode.AGENT_DEFAULT,
-                NotificationMode.SERVER_DEFAULT,
-                NotificationMode.APP_DEFAULT,
-              ] as NotificationMode[]
-            ).map((option) => ({
-              value: option,
-              label: labelWithResolution(option, notifResolved),
-              danger: option === NotificationMode.OFF,
-            }))
-          }
-          onSelect={async (option) => {
-            setNotifSetting(option);
-            await saveConversationSetting(params.conversationId, option);
-            const app = await loadAppDefault();
-            setNotifResolved(resolveMode(option, NotificationMode.SERVER_DEFAULT, NotificationMode.APP_DEFAULT, app));
-          }}
-        />
-
-        <Touchable
-          accessibilityRole="button"
-          accessibilityLabel="Reset notification to agent default"
-          onPress={async () => {
-            setNotifSetting(NotificationMode.AGENT_DEFAULT);
-            await saveConversationSetting(params.conversationId, NotificationMode.AGENT_DEFAULT);
-            const app = await loadAppDefault();
-            setNotifResolved(resolveMode(NotificationMode.AGENT_DEFAULT, NotificationMode.SERVER_DEFAULT, NotificationMode.APP_DEFAULT, app));
-          }}
-          style={styles.resetBtn}
-        >
-          <Text role="body" tone="danger">
-            Reset notification to agent default
-          </Text>
-        </Touchable>
-
-        <Touchable
-          accessibilityRole="button"
-          accessibilityLabel="Reset permission to agent default"
-          onPress={async () => {
-            setPermSetting(PermissionCascadeMode.AGENT_DEFAULT);
-            await saveConversationPerm(params.conversationId, PermissionCascadeMode.AGENT_DEFAULT);
-            setPermResolved(resolvePermission(PermissionCascadeMode.AGENT_DEFAULT, PermissionCascadeMode.STANDARD, PermissionCascadeMode.STANDARD, PermissionCascadeMode.STANDARD));
-          }}
-          style={styles.resetBtn}
-        >
-          <Text role="body" tone="danger">
-            Reset permission to agent default
-          </Text>
-        </Touchable>
-
+      <Sheet ref={controlsSheetRef} title="Permission mode">
+        {(
+          [
+            { mode: "strict" as PermissionMode, label: "Strict", detail: "Every tool asks, even reads" },
+            { mode: "standard" as PermissionMode, label: "Standard", detail: "Asks before risky tools" },
+            { mode: "acceptEdits" as PermissionMode, label: "Accept edits", detail: "File edits are auto-approved" },
+            { mode: "unrestricted" as PermissionMode, label: "Unrestricted", detail: "Everything auto-approved" },
+          ]
+        ).map(({ mode, label, detail }) => {
+          const selected = snapshot.device?.permissionMode === mode;
+          return (
+            <Touchable
+              key={mode}
+              accessibilityRole="button"
+              accessibilityLabel={`${label}. ${detail}${selected ? ". Selected" : ""}`}
+              onPress={() => {
+                void sessionRef.current?.setPermissionMode(mode);
+                controlsSheetRef.current?.dismiss();
+              }}
+              style={styles.permissionRow}
+            >
+              <View style={styles.permissionRowInner}>
+                <View style={styles.permissionText}>
+                  <Text role="body" tone={mode === "unrestricted" ? "danger" : undefined}>
+                    {label}
+                  </Text>
+                  <Text role="sub" ink={3}>
+                    {detail}
+                  </Text>
+                </View>
+                {selected ? (
+                  <Text role="bodyEm" tone="accent">
+                    ✓
+                  </Text>
+                ) : null}
+              </View>
+            </Touchable>
+          );
+        })}
         {snapshot.device?.workingDirectory ? (
           <Text role="sub" ink={3} mono numberOfLines={1}>
             cwd: {snapshot.device.workingDirectory}
@@ -1309,56 +785,18 @@ export default function ChatScreen() {
         onSelect={(handle, nextEffort) => void selectModel(handle, nextEffort)}
         error={modelError}
       />
-      {activeProfile?.type === "cloud" ? (
-        <EnvironmentSheet
-          ref={envSheetRef}
-          computers={computers}
-          selectedConnectionId={
-            effectiveSelector && typeof effectiveSelector === "object" && "connectionId" in effectiveSelector
-              ? effectiveSelector.connectionId
-              : null
-          }
-          selectedDeviceId={
-            effectiveSelector && typeof effectiveSelector === "object" && "deviceId" in effectiveSelector
-              ? effectiveSelector.deviceId
-              : null
-          }
-          onSelect={(connectionId, name, deviceId, asDefault) =>
-            selectEnvironment(connectionId, name, deviceId, asDefault)
-          }
-          loading={envLoading}
-          error={envError}
-        />
-      ) : null}
     </Screen>
   );
 }
 
 const styles = StyleSheet.create({
-  renameRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-    paddingVertical: 10,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: "rgba(128,128,128,0.2)",
-    marginBottom: 6,
-  },
-  renameBtn: { paddingHorizontal: 8, paddingVertical: 4 },
-  idRow: { paddingVertical: 10 },
-  idRowInner: { flexDirection: "row", alignItems: "center", gap: 8 },
-  idLabel: { width: 110 },
   flex: { flex: 1 },
   statusRow: { flexDirection: "row", alignItems: "center", gap: 6 },
   // Inverted list: style paddingTop renders at the VISUAL bottom (above the
   // composer), paddingBottom at the visual top.
   transcript: { paddingHorizontal: space.gutter, paddingTop: space.xl, paddingBottom: space.md, gap: space.md },
-  // Counter-rotation for ListEmptyComponent in the inverted list. Android's
-  // inversion transform is scale: -1 (both axes); iOS uses scaleY only.
-  invertedEmpty:
-    Platform.OS === "android"
-      ? { transform: [{ scale: -1 }] }
-      : { transform: [{ scaleY: -1 }] },
+  // FlatList does not counter-rotate ListEmptyComponent when `inverted` is set.
+  invertedEmpty: { transform: [{ scaleY: -1 }] },
   latestWrap: { position: "absolute", left: 0, right: 0, bottom: space.md, alignItems: "center" },
   olderSpinner: { paddingVertical: space.md, alignItems: "center" },
   attachRow: { flexDirection: "row", gap: space.sm, paddingBottom: space.sm },
@@ -1404,10 +842,9 @@ const styles = StyleSheet.create({
   spacer: { flex: 1 },
   queueSend: { paddingHorizontal: space.sm },
   modelChip: { maxWidth: 220, paddingVertical: 4 },
-  gear: { paddingHorizontal: space.sm, marginRight: space.xs },
-  sectionLabel: { paddingTop: space.sm, paddingBottom: 2 },
-  sectionDivider: { height: StyleSheet.hairlineWidth, marginVertical: space.md, backgroundColor: "transparent" },
-  resetBtn: { paddingVertical: space.sm, alignItems: "center" },
+  permissionRow: { minHeight: 52 },
+  permissionRowInner: { flexDirection: "row", alignItems: "center", gap: space.sm, paddingVertical: 6 },
+  permissionText: { flex: 1, gap: 1 },
   sendTouch: { minHeight: 34 },
   send: {
     width: 34,
