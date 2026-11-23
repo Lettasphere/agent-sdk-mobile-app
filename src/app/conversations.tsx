@@ -41,9 +41,7 @@ import {
   subscribeConversationActivity,
   type ConversationActivity,
 } from "../lib/letta/ChatSession";
-import { getSecret, type Profile } from "../lib/profiles/profiles";
-import { setStringAsync as copyToClipboard } from "expo-clipboard";
-import { haptic } from "../lib/haptics";
+
 import { useProfiles } from "../lib/profiles/ProfilesContext";
 import {
   NotificationMode,
@@ -89,11 +87,7 @@ function useActivity(conversationId: string): ConversationActivity | null {
   return useSyncExternalStore(subscribeConversationActivity, read);
 }
 
-function ConversationRow({ conversation, preview, running, pinned, onPress, onLongPress }: {
-  conversation: ConversationSummary;
-  preview?: string | null;
-  running?: boolean;
-  pinned?: boolean;
+
   onPress: () => void;
   onLongPress: () => void;
 }) {
@@ -115,22 +109,7 @@ function ConversationRow({ conversation, preview, running, pinned, onPress, onLo
     >
       <View style={styles.rowInner}>
         <View style={styles.rowText}>
-          <Text role="bodyEm" numberOfLines={1}>
-            {pinned ? "★ " : ""}
-            {conversation.title}
-          </Text>
-          {inProgress ? (
-            <View style={styles.runningRow}>
-              <ActivityIndicator size="small" color={colors.accent} />
-              <Text role="sub" ink={2} numberOfLines={1}>
-                {activityLabel ?? "working…"}
-              </Text>
-            </View>
-          ) : (
-            <Text role="sub" ink={2} numberOfLines={2}>
-              {preview ?? relativeTime(conversation.lastMessageAt)}
-            </Text>
-          )}
+
         </View>
         {activity ? (
           <StatusDot tone={activity === "awaiting_approval" ? "wait" : "run"} />
@@ -160,75 +139,12 @@ export default function ConversationsScreen() {
   const [loadingMore, setLoadingMore] = useState(false);
   const [hasMore, setHasMore] = useState(true);
   const [search, setSearch] = useState("");
+  const [chatMeta, setChatMeta] = useState<ChatMeta>({ pinned: [], readCursors: {} });
   const renameSheetRef = useRef<BottomSheetModal>(null);
   const [renaming, setRenaming] = useState<ConversationSummary | null>(null);
   const [draftTitle, setDraftTitle] = useState("");
 
-  // Agent settings sheet state — agent-level notification + permission defaults,
-  // plus reset for all conversation overrides downstream.
-  const agentSettingsRef = useRef<BottomSheetModal>(null);
-  const [agentNotifSetting, setAgentNotifSetting] = useState<NotificationMode>(NotificationMode.SERVER_DEFAULT);
-  const [agentNotifResolved, setAgentNotifResolved] = useState<NotificationMode>(NotificationMode.OFF);
-  const [agentNotifServer, setAgentNotifServer] = useState<NotificationMode>(NotificationMode.APP_DEFAULT);
-  const [agentNotifApp, setAgentNotifApp] = useState<NotificationMode>(NotificationMode.OFF);
-  const [agentPermSetting, setAgentPermSetting] = useState<PermissionCascadeValue>(PermissionCascadeMode.SERVER_DEFAULT);
-  const [agentPermResolved, setAgentPermResolved] = useState<PermissionCascadeValue>(PermissionCascadeMode.STANDARD);
-  const [agentPermServer, setAgentPermServer] = useState<PermissionCascadeValue>(PermissionCascadeMode.APP_DEFAULT);
-  const [agentPermApp, setAgentPermApp] = useState<PermissionCascadeValue>(PermissionCascadeMode.STANDARD);
 
-  useEffect(() => {
-    if (!agentId) return;
-    let cancelled = false;
-    void (async () => {
-      const [notifSetting, notifServer, notifApp, permSetting, permServer, permApp] = await Promise.all([
-        loadAgentSetting(agentId),
-        activeProfile ? loadServerSetting(activeProfile.id) : Promise.resolve(NotificationMode.APP_DEFAULT),
-        loadAppDefault(),
-        loadAgentPerm(agentId),
-        activeProfile ? loadServerPerm(activeProfile.id) : Promise.resolve(PermissionCascadeMode.APP_DEFAULT),
-        loadAppPermDefault(),
-      ]);
-      if (cancelled) return;
-      setAgentNotifSetting(notifSetting);
-      setAgentNotifServer(notifServer);
-      setAgentNotifApp(notifApp);
-      setAgentNotifResolved(resolveMode(notifSetting, notifServer, notifApp, notifApp));
-      setAgentPermSetting(permSetting);
-      setAgentPermServer(permServer);
-      setAgentPermApp(permApp);
-      setAgentPermResolved(resolvePermission(permSetting, permServer, permApp, permApp));
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [agentId, activeProfile]);
-
-  const openAgentSettings = () => {
-    agentSettingsRef.current?.present();
-  };
-
-  const selectAgentNotif = async (mode: NotificationMode) => {
-    setAgentNotifSetting(mode);
-    setAgentNotifResolved(resolveMode(mode, agentNotifServer, agentNotifApp, agentNotifApp));
-    await saveAgentSetting(agentId, mode);
-  };
-
-  const selectAgentPerm = async (mode: PermissionCascadeValue) => {
-    setAgentPermSetting(mode);
-    setAgentPermResolved(resolvePermission(mode, agentPermServer, agentPermApp, agentPermApp));
-    await saveAgentPerm(agentId, mode);
-  };
-
-  // Reset downstream for this agent: clears conversation-level overrides for
-  // every conversation under this agent.
-  const confirmReset = (title: string, message: string, run: () => Promise<void>) =>
-    Alert.alert(title, message, [
-      { text: "Cancel", style: "cancel" },
-      { text: "Reset", style: "destructive", onPress: () => void run() },
-    ]);
-
-  const resetConvNotifDownstream = async () => {
-    if (!activeProfile) return;
     try {
       const secret = (await getSecret(activeProfile.id)) ?? "";
       const convs = await listConversations({ profile: activeProfile, secret }, agentId, { limit: 100 });
@@ -448,6 +364,9 @@ export default function ConversationsScreen() {
   };
 
   const openChat = (conversation: ConversationSummary) => {
+    if (activeProfile && conversation.lastMessageAt) {
+      void markRead(activeProfile.id, conversation.id, new Date(conversation.lastMessageAt).getTime()).then(setChatMeta);
+    }
     router.push({
       pathname: "/chat",
       params: { conversationId: conversation.id, agentId, agentName, title: conversation.title },
@@ -514,13 +433,7 @@ export default function ConversationsScreen() {
   };
 
   const showActions = (conversation: ConversationSummary) => {
-    setActionTarget(conversation);
-    actionsSheetRef.current?.present();
-  };
 
-  const filtered = (conversations ?? [])
-    .filter((c) => c.title.toLowerCase().includes(search.trim().toLowerCase()))
-    .sort((a, b) => Number(pinned.has(b.id)) - Number(pinned.has(a.id)));
 
   return (
     <Screen>
@@ -565,6 +478,7 @@ export default function ConversationsScreen() {
       />
       {conversations !== null && conversations.length > 0 ? (
         <View style={styles.searchWrap}>
+          <View style={styles.metaRow}>
           <TextInput
             value={search}
             onChangeText={setSearch}
@@ -573,6 +487,28 @@ export default function ConversationsScreen() {
             autoCapitalize="none"
             style={[styles.search, { backgroundColor: colors.surface, borderColor: colors.surfaceEdge, color: colors.ink }]}
           />
+          {visible.some(
+            (c) => c.lastMessageAt !== undefined &&
+              (chatMeta.readCursors[c.id] ?? 0) < new Date(c.lastMessageAt).getTime(),
+          ) ? (
+            <Touchable
+              accessibilityRole="button"
+              accessibilityLabel="Mark all read"
+              onPress={() => {
+                if (!activeProfile || !conversations) return;
+                void markAllRead(
+                  activeProfile.id,
+                  conversations.map((c) => ({ id: c.id, seenAt: c.lastMessageAt ? new Date(c.lastMessageAt).getTime() : Date.now() })),
+                ).then(setChatMeta);
+              }}
+              style={styles.markAll}
+            >
+              <Text role="sub" tone="accent">
+                Mark all read
+              </Text>
+            </Touchable>
+          ) : null}
+          </View>
         </View>
       ) : null}
       {conversations === null ? (
@@ -584,9 +520,7 @@ export default function ConversationsScreen() {
           renderItem={({ item }) => (
             <ConversationRow
               conversation={item}
-              preview={previews[item.id]}
-              running={runningConvs.has(item.id)}
-              pinned={pinned.has(item.id)}
+
               onPress={() => openChat(item)}
               onLongPress={() => showActions(item)}
             />
@@ -904,6 +838,10 @@ const styles = StyleSheet.create({
   runningRow: { flexDirection: "row", alignItems: "center", gap: 8 },
   list: { paddingBottom: space.xxl, flexGrow: 1 },
   row: { paddingHorizontal: space.gutter },
+  metaRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 8 },
+  markAll: { paddingHorizontal: 8, paddingVertical: 4 },
+  titleRow: { flexDirection: "row", alignItems: "center", gap: 6 },
+  unreadDot: { width: 8, height: 8, borderRadius: 4 },
   rowInner: { flexDirection: "row", alignItems: "center", paddingVertical: 14 },
   rowText: { flex: 1, gap: 2 },
   divider: { height: StyleSheet.hairlineWidth },

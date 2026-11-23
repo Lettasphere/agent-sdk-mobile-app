@@ -26,15 +26,7 @@ import { ExternalTranscriptStore } from "./ExternalTranscriptStore";
 import { mergeTranscript } from "@angus/letta-client-core";
 import { emptyChat, type ApprovalRequest, type ChatSnapshot, type PermissionMode, type ToolStatus, type TranscriptItem } from "./model";
 import { patch } from "./mockSession";
-import { classifyResult, classifyStreamError, contentToText, formatToolInput, newestTextKey, projectRows, type ProjectionState } from "@angus/letta-client-core";
-import {
-  resolveEffectivePermission,
-  saveConversationPerm,
-  toSdkPermissionMode,
-  isConcretePerm,
-  PermissionCascadeMode,
-  type PermissionCascadeValue,
-} from "../permissions";
+
 
 export type SnapshotListener = (snapshot: ChatSnapshot) => void;
 
@@ -1630,69 +1622,15 @@ export class ChatSession {
       }
 
       case "result": {
-        // An aborted turn completes as a result with stopReason "interrupted"
-        // and no settled assistant message, so the row it left behind is the
-        // only place "Stopped" can be shown.
+        // SDK 0.8.39 terminal doctrine (./terminal.ts): the result frame is
+        // the only authority on how the turn ended. stream_closed /
+        // recoverable results are transport loss — outcome unknown — so they
+        // settle WITHOUT an error row; the connection banner owns them.
+        const outcome = classifyResult(message);
         const interrupted = !message.success || message.stopReason === "interrupted";
         this.interruptedKey = interrupted ? newestTextKey(this.accumulator.rows()) : null;
         const idle = this.project(patch(snapshot, { run: "idle" }));
-        // Terminal classification (SDK 0.8.39 doctrine, terminal.ts): a
-        // stream_closed result is transport loss with an UNKNOWN outcome —
-        // the run may complete server-side. It settles the turn (no more
-        // streaming visuals) but renders as uncertainty, not a failure row.
-        const outcome = classifyResult(message);
-        // Notification hook: fire the appropriate callback based on whether
-        // the run was started from this app (local) or another client.
-        // The UI checks isScreenVisible + notification mode to decide
-        // whether to post a system notification. A lost stream is not a
-        // failed run — notify as inconclusive, not as failure. And an
-        // UNKNOWN outcome must not retire delivery ownership: the armed
-        // MOBILE_ONLY one-shot stays live until a settling signal (below).
-        if (this.localRunInFlight) {
-          if (outcome.kind === "stream_lost") {
-            // Defer: hold settlement on this session. The run may complete
-            // server-side — loop_status IDLE, a definitive result on a
-            // reconnected stream, or the REST tail reconcile settles it
-            // (settleLocalOutcome below fires onTurnCompleted exactly once).
-            this.pendingLocalSettlement = {
-              runIds: message.runIds ?? [],
-            };
-            // Clear the in-flight flag so the heartbeat's REST reconcile
-            // loop can run for this conversation (it skips local runs) —
-            // that reconcile is a settling signal while the stream is dead.
-            this.localRunInFlight = false;
-          } else {
-            // A definitive result while a settlement is pending (reconnected
-            // stream delivered the real outcome): prefer it — it carries the
-            // actual success/failure.
-            this.pendingLocalSettlement = null;
-            if (this.onTurnCompleted) this.onTurnCompleted(outcome.kind !== "failed");
-            this.localRunInFlight = false;
-          }
-        } else if (this.pendingLocalSettlement) {
-          // The deferred turn's result arrived without a local flag (it was
-          // cleared at deferral) — settle with the definitive outcome.
-          if (outcome.kind === "stream_lost") {
-            // A SECOND stream loss while unsettled: keep waiting (the first
-            // deferral's runIds still govern).
-          } else {
-            this.settleLocalOutcome(outcome.kind !== "failed");
-          }
-        } else {
-          if (this.onExternalRunCompleted) this.onExternalRunCompleted(outcome.kind !== "failed");
-        }
-        if (outcome.kind === "stream_lost") {
-          // Connection state already tells the story (the banner owns
-          // transport errors); nothing new to render on the transcript.
-          return patch(idle, { connection: "offline" });
-        }
-        return outcome.kind === "success"
-          ? idle
-          : this.appendError(idle, outcome.detail);
-      }
 
-      case "error": {
-        const outcome = classifyStreamError(message);
         this.interruptedKey = newestTextKey(this.accumulator.rows());
         if (outcome.kind === "stream_lost") {
           // Transport loss mid-run (recoverable per the SDK): outcome

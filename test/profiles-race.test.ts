@@ -37,7 +37,18 @@ interface OAuthCredential {
   expiresAt: number;
 }
 
+<<<<<<< HEAD:test/profiles-race.test.ts
 mock.module("../src/lib/auth/oauthTokens", () => ({
+=======
+// bun's mock.module is PROCESS-GLOBAL: this replacement is visible to every
+// later test file in the same run. Spread the REAL module's exports and
+// override only what this file exercises — downstream importers (ChatSession's
+// graph via api.ts, oauthTokens.test.ts) keep real behavior for the rest.
+const realOAuthTokens = await import("../auth/oauthTokens");
+mock.module("../auth/oauthTokens", () => ({
+  ...realOAuthTokens,
+  // Mocked behavior under test:
+>>>>>>> 66c7e39a1faaa0bb4a8ffda929d96c7e6d14f960:src/lib/profiles/profiles.test.ts
   parseOAuthCredential: (value: string): OAuthCredential | null => {
     const parsed = JSON.parse(value) as OAuthCredential;
     return parsed.kind === "oauth" ? parsed : null;

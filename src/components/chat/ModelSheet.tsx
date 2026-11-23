@@ -22,24 +22,7 @@ import { Sheet } from "../ui/Sheet";
 import { Text } from "../ui/Text";
 import { Touchable } from "../ui/Touchable";
 
-/** Canonical display order for effort tiers. */
-const EFFORT_ORDER: readonly ReasoningEffort[] = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
 
-/**
- * Effort tiers the app can actually send for this handle: OpenAI takes every
- * catalog tier, Anthropic has no none/minimal tier, z.ai (GLM: zai/, z-ai/,
- * lc-zai-coding/ handles) sends reasoning.reasoning_effort with whatever
- * tiers the catalog declares. Other providers have no effort payload wired
- * up (modelSettingsFor sends the model change alone).
- */
-function sendableEfforts(handle: string, efforts: ReasoningEffort[]): ReasoningEffort[] {
-  const provider = handle.includes("/") ? handle.split("/")[0] : undefined;
-  if (provider === "openai") return EFFORT_ORDER.filter((e) => efforts.includes(e));
-  if (provider === "anthropic") return EFFORT_ORDER.filter((e) => e !== "none" && e !== "minimal" && efforts.includes(e));
-  if (provider === "zai" || provider === "z-ai" || provider === "lc-zai-coding") {
-    return EFFORT_ORDER.filter((e) => efforts.includes(e));
-  }
-  return [];
 }
 
 interface Props {
@@ -65,29 +48,7 @@ export const ModelSheet = forwardRef<BottomSheetModal, Props>(function ModelShee
 ) {
   const { colors } = useTheme();
   const [search, setSearch] = useState("");
-  const [favorites, setFavorites] = useState<string[]>([]);
-  const [recents, setRecents] = useState<string[]>([]);
-  const [effort, setEffort] = useState<ReasoningEffort | null>(null);
-  // Model tapped while the sheet stays open, waiting for an effort choice.
-  const [pending, setPending] = useState<ModelOption | null>(null);
 
-  // handle → tiers the catalog ships for it (from the per-variant entries).
-  const catalogEfforts = useMemo(() => {
-    const map = new Map<string, Set<ReasoningEffort>>();
-    for (const m of models) {
-      let set = map.get(m.handle);
-      if (!set) map.set(m.handle, (set = new Set()));
-      // Per-effort catalog variants (e.g. openai tiers ship as separate entries).
-      if (m.effort) set.add(m.effort);
-      // reasoning_capabilities.supported_efforts (z.ai/GLM family).
-      for (const e of m.supportedEfforts ?? []) set.add(e);
-    }
-    return map;
-  }, [models]);
-
-  const effortsFor = useCallback(
-    (handle: string) => sendableEfforts(handle, [...(catalogEfforts.get(handle) ?? [])]),
-    [catalogEfforts],
   );
 
   // Efforts of the model the segment targets: a pending pick if one is waiting,
@@ -234,31 +195,7 @@ export const ModelSheet = forwardRef<BottomSheetModal, Props>(function ModelShee
         autoCapitalize="none"
         style={[styles.search, { borderColor: colors.surfaceEdge, color: colors.ink }]}
       />
-      {!onPick && currentModelEfforts.length > 0 ? (
-        <View style={styles.effortBlock}>
-          <Text role="micro" ink={3}>
-            {pending ? `Reasoning effort — ${pending.label}` : "Reasoning effort"}
-          </Text>
-          <View style={[styles.segment, { borderColor: colors.surfaceEdge }]}>
-            {currentModelEfforts.map((e) => (
-              <Touchable
-                key={e}
-                accessibilityRole="button"
-                accessibilityLabel={`Effort ${e}${effort === e ? ", selected" : ""}`}
-                onPress={() => selectEffort(e)}
-                style={[styles.segmentItem, effort === e && { backgroundColor: colors.bubble }]}
-              >
-                <Text role="sub" ink={effort === e ? 1 : 2} style={styles.segmentLabel}>
-                  {e}
-                </Text>
-              </Touchable>
-            ))}
-          </View>
-          {pending ? (
-            <Text role="sub" ink={3}>
-              Pick an effort to switch to {pending.label}, or tap another model.
-            </Text>
-          ) : null}
+
         </View>
       ) : null}
       {error ? (
