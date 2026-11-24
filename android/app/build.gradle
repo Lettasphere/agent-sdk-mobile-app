@@ -107,14 +107,21 @@ android {
         release {
             // Dedicated release keystore (fleet pattern: ~/.keystores/<app>-release.jks),
             // driven by project properties PLAY_STORE_FILE/PLAY_STORE_PASSWORD/PLAY_KEY_ALIAS/PLAY_KEY_PASSWORD
-            // (set in ~/.gradle/gradle.properties or -P flags). Falls back to the debug key so
-            // keystore-less builds (local, CI) still produce installable APKs — sideload-channel
-            // continuity with v0.1.0/0.4.0 debug-cert installs.
-            if (project.hasProperty('PLAY_STORE_FILE')) {
+            // (set via -P flags; note: file() resolves relative to android/app/ and does NOT
+            // expand ~ — PLAY_STORE_FILE must be an absolute path, e.g. /home/<user>/.keystores/x.jks).
+            // Falls back to the debug key so keystore-less builds (local, CI) still produce
+            // installable APKs — sideload-channel continuity with v0.1.0/0.4.0 debug-cert installs.
+            if (['PLAY_STORE_FILE', 'PLAY_STORE_PASSWORD', 'PLAY_KEY_ALIAS', 'PLAY_KEY_PASSWORD']
+                    .every { project.hasProperty(it) }) {
                 storeFile file(PLAY_STORE_FILE)
                 storePassword PLAY_STORE_PASSWORD
                 keyAlias PLAY_KEY_ALIAS
                 keyPassword PLAY_KEY_PASSWORD
+            } else if (['PLAY_STORE_FILE', 'PLAY_STORE_PASSWORD', 'PLAY_KEY_ALIAS', 'PLAY_KEY_PASSWORD']
+                    .any { project.hasProperty(it) }) {
+                // Partial set — fail at configuration time with a cause a 2am release can read.
+                throw new GradleException(
+                    'Play signing requires ALL of PLAY_STORE_FILE, PLAY_STORE_PASSWORD, PLAY_KEY_ALIAS, PLAY_KEY_PASSWORD — only some are set. Unset them all (debug fallback) or set all four.')
             } else {
                 storeFile file('debug.keystore')
                 storePassword 'android'
