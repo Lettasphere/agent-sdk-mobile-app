@@ -5,7 +5,7 @@
     "": {
       "name": "letta-mobile",
       "dependencies": {
-        "@angus/letta-client-core": "git+https://git.angussoftware.dev/coda/letta-client-core.git#323618c47dde9e8a82bb169ef7f80599abd015fa",
+        "@angus/letta-client-core": "git+https://github.com/coda-rho-bot/letta-client-core.git#323618c47dde9e8a82bb169ef7f80599abd015fa",
         "@gorhom/bottom-sheet": "^5.2.6",
         "@letta-ai/letta-agent-sdk": "0.8.39",
         "@react-native-async-storage/async-storage": "~2.2.0",
@@ -55,7 +55,7 @@
 
     "@alcalzone/ansi-tokenize": ["@alcalzone/ansi-tokenize@0.3.0", "", { "dependencies": { "ansi-styles": "^6.2.1", "is-fullwidth-code-point": "^5.0.0" } }, "sha512-p+CMKJ93HFmLkjXKlXiVGlMQEuRb6H0MokBSwUsX+S6BRX8eV5naFZpQJFfJHjRZY0Hmnqy1/r6UWl3x+19zYA=="],
 
-    "@angus/letta-client-core": ["@angus/letta-client-core@git+https://git.angussoftware.dev/coda/letta-client-core.git#323618c47dde9e8a82bb169ef7f80599abd015fa", { "dependencies": { "@letta-ai/letta-agent-sdk": "0.8.39" } }, "323618c47dde9e8a82bb169ef7f80599abd015fa"],
+    "@angus/letta-client-core": ["@angus/letta-client-core@github:coda-rho-bot/letta-client-core#323618c", { "dependencies": { "@letta-ai/letta-agent-sdk": "0.8.39" } }, "coda-rho-bot-letta-client-core-323618c", "sha512-pqHaVTT9/RKRaI2g5zBAYRRdpYMApSLTQ2Bh8jyTA9tLSGqZnkYnh7JLbNMjZjtzlvT030U0qW648gtpXXvZyQ=="],
 
     "@anthropic-ai/sdk": ["@anthropic-ai/sdk@0.91.1", "", { "dependencies": { "json-schema-to-ts": "^3.1.1" }, "peerDependencies": { "zod": "^3.25.0 || ^4.0.0" }, "optionalPeers": ["zod"], "bin": { "anthropic-ai-sdk": "bin/cli" } }, "sha512-LAmu761tSN9r66ixvmciswUj/ZC+1Q4iAfpedTfSVLeswRwnY3n2Nb6Tsk+cLPP28aLOPWeMgIuTuCcMC6W/iw=="],
 
