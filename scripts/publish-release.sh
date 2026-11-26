@@ -95,12 +95,18 @@ SIZE=$(stat -c%s "$APK")
 TAG="v$NEW_VERSION"
 echo "Publishing $TAG (${SIZE} bytes)…"
 
-RELEASE_ID=$(curl -s -X POST "$REPO_API/releases" \
+# Create the release (a 422 "already exists" on re-publish is fine — we
+# re-read by tag below either way; exactly one release per tag, a second
+# run APPENDS assets rather than duplicating the release).
+curl -s -X POST "$REPO_API/releases" \
   -H "Authorization: token $GITHUB_TOKEN" -H "Content-Type: application/json" \
   -d "{\"tag_name\":\"$TAG\",\"name\":\"$TAG\",\"body\":\"Lettasphere mobile $TAG\",\"prerelease\":false}" \
-  | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['id'] if 'id' in d else die_msg(d))" 2>/dev/null || true)
-RELEASE_ID=$(curl -s "$REPO_API/releases/tags/$TAG" -H "Authorization: token $GITHUB_TOKEN" | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])" 2>/dev/null)
-[[ -n "$RELEASE_ID" ]] || die "release creation failed for $TAG"
+  > /dev/null || true
+# Authoritative id: re-read by tag. Dies if creation failed for any other
+# reason (auth, rate limit) — the release genuinely doesn't exist.
+RELEASE_ID=$(curl -s "$REPO_API/releases/tags/$TAG" -H "Authorization: token $GITHUB_TOKEN" \
+  | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('id') or '')" 2>/dev/null)
+[[ -n "$RELEASE_ID" ]] || die "release $TAG does not exist after create (check GITHUB_TOKEN scope / rate limit)"
 
 upload_asset() {
   local name="$1" file="$2" type="$3"
