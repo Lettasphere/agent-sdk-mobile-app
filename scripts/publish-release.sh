@@ -9,21 +9,25 @@
 #   scripts/publish-release.sh            # bump patch, build, upload
 #   scripts/publish-release.sh 0.4.0      # explicit version
 #
-# Requires: FORGEJO_CODA_TOKEN in env, ANDROID_HOME, JAVA_HOME.
+# Requires: GITHUB_TOKEN (repo scope, Lettasphere org access) in env,
+# ANDROID_HOME, JAVA_HOME.
 #
-# Release contract (consumed by the in-app updater):
-#   Forgejo release tag:            v<version>
-#   Asset: agents-chat-<version>.apk
-#   Asset: latest.json              {"version": "...", "apk": "<asset UUID url>",
-#                                    "versionCode": N, "releasedAt": "ISO8601"}
-#   latest.json is attached to EVERY release, so the newest release's
-#   latest.json is the current manifest (queried via ?limit=1 API).
+# Release contract (consumed by the in-app updater — src/lib/updater.ts):
+#   GitHub release tag:             v<version>
+#   Asset: agent-sdk-mobile-<version>.apk (the FIRST .apk asset on the
+#   latest release is the update target; the updater reads the release
+#   object directly, no separate manifest file).
+#   Publishes to Lettasphere/agent-sdk-mobile-app — the same repo the
+#   updater's RELEASES_API polls. GitHub releases are public + anonymous,
+#   matching the updater's no-token fetch.
 
 set -euo pipefail
 
-REPO_API="https://git.angussoftware.dev/api/v1/repos/coda/agents-chat-releases"
+REPO="Lettasphere/agent-sdk-mobile-app"
+REPO_API="https://api.github.com/repos/$REPO"
+UPLOADS_API="https://uploads.github.com/repos/$REPO"
 APK_DIR="android/app/build/outputs/apk/release"
-SLUG="agents-chat"
+SLUG="agent-sdk-mobile"
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 
@@ -92,32 +96,29 @@ TAG="v$NEW_VERSION"
 echo "Publishing $TAG (${SIZE} bytes)…"
 
 RELEASE_ID=$(curl -s -X POST "$REPO_API/releases" \
-  -H "Authorization: token $FORGEJO_CODA_TOKEN" -H "Content-Type: application/json" \
-  -d "{\"tag_name\":\"$TAG\",\"name\":\"$TAG\",\"body\":\"Agents Chat $TAG\",\"prerelease\":false}" \
-  | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
+  -H "Authorization: token $GITHUB_TOKEN" -H "Content-Type: application/json" \
+  -d "{\"tag_name\":\"$TAG\",\"name\":\"$TAG\",\"body\":\"Lettasphere mobile $TAG\",\"prerelease\":false}" \
+  | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['id'] if 'id' in d else die_msg(d))" 2>/dev/null || true)
+RELEASE_ID=$(curl -s "$REPO_API/releases/tags/$TAG" -H "Authorization: token $GITHUB_TOKEN" | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])" 2>/dev/null)
+[[ -n "$RELEASE_ID" ]] || die "release creation failed for $TAG"
 
 upload_asset() {
   local name="$1" file="$2" type="$3"
-  curl -s -X POST "$REPO_API/releases/$RELEASE_ID/assets?name=$name" \
-    -H "Authorization: token $FORGEJO_CODA_TOKEN" \
-    -F "attachment=@$file;type=$type" \
+  curl -s -X POST "$UPLOADS_API/releases/$RELEASE_ID/assets?name=$name" \
+    -H "Authorization: token $GITHUB_TOKEN" \
+    -H "Content-Type: $type" \
+    --data-binary @"$file" \
     | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('browser_download_url') or d)"
 }
 
 APK_URL=$(upload_asset "$SLUG-$NEW_VERSION.apk" "$APK" "application/vnd.android.package-archive")
 [[ "$APK_URL" == https://* ]] || die "apk upload failed: $APK_URL"
 
-RELEASED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-printf '{"version":"%s","versionCode":%d,"apk":"%s","size":%d,"releasedAt":"%s"}\n' \
-  "$NEW_VERSION" "$VERSION_CODE" "$APK_URL" "$SIZE" "$RELEASED_AT" > /tmp/ac-latest.json
-MANIFEST_URL=$(upload_asset "latest.json" /tmp/ac-latest.json "application/json")
-[[ "$MANIFEST_URL" == https://* ]] || die "manifest upload failed: $MANIFEST_URL"
-
-rm -f /tmp/ac-latest.json /tmp/ac-build.log
+rm -f /tmp/ac-build.log
 echo
-echo "PUBLISHED $TAG"
-echo "  apk:      $APK_URL"
-echo "  manifest: attached as latest.json to release $TAG (id $RELEASE_ID)"
+echo "PUBLISHED $TAG (GitHub release $RELEASE_ID)"
+echo "  apk: $APK_URL"
+echo "  channel: $REPO (the repo src/lib/updater.ts polls — update checks see it immediately)"
 echo
 echo "NOTE: app.json commit exists locally — push it with the release PR or directly:"
-echo "  git push origin angus   (release bump commits may go straight to angus)"
+echo "  git push origin main   (release bump commits may go straight to main)"
