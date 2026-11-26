@@ -1,4 +1,4 @@
-package com.angussoftware.backgroundpoll
+package dev.lettasphere.backgroundpoll
 
 import android.content.Intent
 import expo.modules.kotlin.modules.Module

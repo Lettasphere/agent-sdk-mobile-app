@@ -17,14 +17,14 @@
     ],
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.angussoftware.agentschat"
+      "bundleIdentifier": "dev.lettasphere.agentschat"
     },
     "android": {
       "adaptiveIcon": {
         "backgroundColor": "#004F50",
         "foregroundImage": "./assets/images/icon-foreground.png"
       },
-      "package": "com.angussoftware.agentschat",
+      "package": "dev.lettasphere.agentschat",
       "edgeToEdgeEnabled": true
     },
     "plugins": [

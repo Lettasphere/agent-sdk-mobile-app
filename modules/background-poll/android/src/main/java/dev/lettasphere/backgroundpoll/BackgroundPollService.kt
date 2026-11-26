@@ -1,4 +1,4 @@
-package com.angussoftware.backgroundpoll
+package dev.lettasphere.backgroundpoll
 
 import android.app.Notification
 import android.app.NotificationChannel

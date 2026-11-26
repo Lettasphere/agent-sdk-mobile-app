@@ -87,9 +87,9 @@ android {
     buildToolsVersion rootProject.ext.buildToolsVersion
     compileSdk rootProject.ext.compileSdkVersion
 
-    namespace 'com.angussoftware.agentschat'
+    namespace 'dev.lettasphere.agentschat'
     defaultConfig {
-        applicationId 'com.angussoftware.agentschat'
+        applicationId 'dev.lettasphere.agentschat'
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
         versionCode 400

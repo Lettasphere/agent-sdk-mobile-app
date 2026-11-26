@@ -3,11 +3,11 @@ plugins {
   id 'expo-module-gradle-plugin'
 }
 
-group = 'com.angussoftware.backgroundpoll'
+group = 'dev.lettasphere.backgroundpoll'
 version = '0.1.0'
 
 android {
-  namespace "com.angussoftware.backgroundpoll"
+  namespace "dev.lettasphere.backgroundpoll"
   defaultConfig {
     versionCode 1
     versionName "0.1.0"
