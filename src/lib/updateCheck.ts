@@ -42,12 +42,34 @@ export function localVersion(): string {
   return Constants.expoConfig?.version ?? "0.0.0";
 }
 
-/** Numeric-segment comparison: "0.10.0" > "0.9.2"; suffixes ignored. */
+/**
+ * Numeric-segment comparison for the update check.
+ *
+ * Pre-release suffixes ("0.4.0-ls.2") are STRIPPED before comparison, not
+ * parsed as numeric segments: the installed versionName can legitimately be
+ * the plain base ("0.4.0" — the APK is built from app.json's version while
+ * the release tag carries the suffix), and treating "-ls.2" as numeric
+ * segments [.., 0, 2] made the identical release read as an update for
+ * itself (false-positive banner on the identity release, Nov 26).
+ *
+ * Numeric segments compared left to right; a longer numeric tail still wins
+ * ("0.4.1" > "0.4.0"). Suffix-only differences NEVER create an update —
+ * releases that change only the suffix must bump the numeric version to
+ * distribute.
+ */
 function isRemoteNewer(remote: string, local: string): boolean {
-  const parse = (v: string) =>
-    v.replace(/^v/, "").split(/[.\-+]/).map((seg) => parseInt(seg, 10) || 0);
-  const r = parse(remote);
-  const l = parse(local);
+  const numeric = (v: string) => {
+    const parts = v.replace(/^v/, "").split(/[.\-+]/);
+    // Drop the pre-release suffix: the FIRST segment containing a letter
+    // starts it, and EVERYTHING from there on belongs to it ("0.4.0-ls.2" ->
+    // ["0","4","0","ls","2"] -> "0.4.0"; "0.4.1" stays "0.4.1").
+    const firstAlpha = parts.findIndex((seg) => /[a-zA-Z]/.test(seg));
+    return parts
+      .slice(0, firstAlpha === -1 ? parts.length : firstAlpha)
+      .map((seg) => parseInt(seg, 10) || 0);
+  };
+  const r = numeric(remote);
+  const l = numeric(local);
   for (let i = 0; i < Math.max(r.length, l.length); i++) {
     const rv = r[i] ?? 0;
     const lv = l[i] ?? 0;
