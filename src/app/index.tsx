@@ -238,7 +238,7 @@ export default function ConnectScreen() {
       <Sheet ref={settingsRef} title="App defaults" scroll>
         <View style={styles.versionRow}>
           <Text role="sub" ink={3}>
-            Agents Chat v{localVersion()}
+            Lettasphere Mobile v{localVersion()}
           </Text>
           {update ? (
             <Touchable accessibilityRole="button" accessibilityLabel="Download update" onPress={() => void downloadUpdate(update)} style={styles.versionAction}>
